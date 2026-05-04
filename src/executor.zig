@@ -63,6 +63,13 @@ pub const Executor = struct {
         try self.ensureRequiredInputsBound();
     }
 
+    pub fn setInput(self: *Executor, name: []const u8, value: tensor.Tensor) !void {
+        if (self.isInitializerName(name)) return error.InputOverridesInitializer;
+        _ = try self.graphInput(name);
+
+        try self.put(name, value);
+    }
+
     pub fn execute(self: *Executor) ![]const Output {
         try self.ensureRequiredInputsBound();
 
