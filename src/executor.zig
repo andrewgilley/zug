@@ -95,7 +95,24 @@ pub const Executor = struct {
 
         const output_name = node.output.items[0];
 
-        const result = if (std.mem.eql(u8, op_type, "Flatten")) blk: {
+        const result = if (std.mem.eql(u8, op_type, "Add")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.add(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Constant")) blk: {
+            break :blk try ops.constant(self.allocator, node);
+        } else if (std.mem.eql(u8, op_type, "Conv")) blk: {
+            const x = try self.requiredNodeInput(node, 0);
+            const w = try self.requiredNodeInput(node, 1);
+            const b = try self.optionalNodeInput(node, 2);
+
+            break :blk try ops.conv(self.allocator, x, w, b, .{
+                .pads = try padsAttr(node),
+                .strides = try pairAttr(node, "strides", .{ 1, 1 }),
+                .dilations = try pairAttr(node, "dilations", .{ 1, 1 }),
+                .group = std.math.cast(usize, try intAttr(node, "group", 1)) orelse return error.InvalidConvGroup,
+            });
+        } else if (std.mem.eql(u8, op_type, "Flatten")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             const axis = try intAttr(node, "axis", 1);
             break :blk try ops.flatten(self.allocator, input, axis);
@@ -110,6 +127,10 @@ pub const Executor = struct {
                 .trans_a = (try intAttr(node, "transA", 0)) != 0,
                 .trans_b = (try intAttr(node, "transB", 0)) != 0,
             });
+        } else if (std.mem.eql(u8, op_type, "MatMul")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.matmul(self.allocator, a, b);
         } else if (std.mem.eql(u8, op_type, "Softmax")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             const axis = try intAttr(node, "axis", -1);
@@ -186,7 +207,7 @@ pub const Executor = struct {
 };
 
 fn tensorFromInitializer(allocator: std.mem.Allocator, initializer: *const onnx.TensorProto) !tensor.Tensor {
-    try requireFloat32(initializer.data_type);
+    const dtype = try dtypeFromOnnx(initializer.data_type);
 
     if (initializer.data_location) |location| {
         if (location != .DEFAULT) return error.ExternalTensorDataUnsupported;
@@ -195,23 +216,30 @@ fn tensorFromInitializer(allocator: std.mem.Allocator, initializer: *const onnx.
     if (initializer.segment != null) return error.TensorSegmentsUnsupported;
 
     const shape = try shapeFromDims(allocator, initializer.dims.items);
-    errdefer allocator.free(shape);
+    defer allocator.free(shape);
 
     const count = try tensor.elementCount(shape);
-    const data = try allocator.alloc(f32, count);
-    errdefer allocator.free(data);
 
     if (initializer.raw_data) |raw_data| {
-        try fillFloat32FromRawData(data, raw_data);
-    } else {
-        if (initializer.float_data.items.len != count) return error.TensorElementCountMismatch;
-        @memcpy(data, initializer.float_data.items);
+        return tensorFromRawData(allocator, dtype, shape, raw_data);
     }
 
-    return .{
-        .dtype = .float32,
-        .shape = shape,
-        .data = data,
+    return switch (dtype) {
+        .float32 => tensor.Tensor.initFloat32(allocator, shape, try checkedItems(f32, initializer.float_data.items, count)),
+        .int64 => tensor.Tensor.initInt64(allocator, shape, try checkedItems(i64, initializer.int64_data.items, count)),
+        .int32 => tensor.Tensor.initInt32(allocator, shape, try checkedItems(i32, initializer.int32_data.items, count)),
+        .uint8 => blk: {
+            const data = try allocator.alloc(u8, count);
+            defer allocator.free(data);
+            try fillUint8FromInt32Data(data, initializer.int32_data.items);
+            break :blk tensor.Tensor.initUint8(allocator, shape, data);
+        },
+        .bool => blk: {
+            const data = try allocator.alloc(bool, count);
+            defer allocator.free(data);
+            try fillBoolFromInt32Data(data, initializer.int32_data.items);
+            break :blk tensor.Tensor.initBool(allocator, shape, data);
+        },
     };
 }
 
@@ -220,11 +248,12 @@ fn tensorFromRawFile(
     input: *const onnx.ValueInfoProto,
     path: []const u8,
 ) !tensor.Tensor {
+    const dtype = try dtypeFromValueInfo(input);
     const shape = try shapeFromValueInfo(allocator, input);
-    errdefer allocator.free(shape);
+    defer allocator.free(shape);
 
     const count = try tensor.elementCount(shape);
-    const expected_bytes = try std.math.mul(usize, count, @sizeOf(f32));
+    const expected_bytes = try std.math.mul(usize, count, elementByteSize(dtype));
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         std.Options.debug_io,
@@ -236,16 +265,7 @@ fn tensorFromRawFile(
 
     if (bytes.len != expected_bytes) return error.InputByteLengthMismatch;
 
-    const data = try allocator.alloc(f32, count);
-    errdefer allocator.free(data);
-
-    try fillFloat32FromRawData(data, bytes);
-
-    return .{
-        .dtype = .float32,
-        .shape = shape,
-        .data = data,
-    };
+    return tensorFromRawData(allocator, dtype, shape, bytes);
 }
 
 fn shapeFromDims(allocator: std.mem.Allocator, dims: []const i64) ![]usize {
@@ -269,8 +289,6 @@ fn shapeFromValueInfo(allocator: std.mem.Allocator, input: *const onnx.ValueInfo
         else => return error.UnsupportedInputType,
     };
 
-    try requireFloat32(tensor_type.elem_type);
-
     const shape_proto = tensor_type.shape orelse return error.MissingInputShape;
     const shape = try allocator.alloc(usize, shape_proto.dim.items.len);
     errdefer allocator.free(shape);
@@ -289,16 +307,88 @@ fn shapeFromValueInfo(allocator: std.mem.Allocator, input: *const onnx.ValueInfo
     return shape;
 }
 
-fn requireFloat32(data_type: ?i32) !void {
+fn dtypeFromValueInfo(input: *const onnx.ValueInfoProto) !tensor.DType {
+    const type_proto = input.type orelse return error.MissingInputType;
+    const type_value = type_proto.value orelse return error.MissingInputType;
+
+    const tensor_type = switch (type_value) {
+        .tensor_type => |value| value,
+        else => return error.UnsupportedInputType,
+    };
+
+    return dtypeFromOnnx(tensor_type.elem_type);
+}
+
+fn dtypeFromOnnx(data_type: ?i32) !tensor.DType {
     const actual = data_type orelse return error.MissingTensorDataType;
-    if (actual != @intFromEnum(onnx.TensorProto.DataType.FLOAT)) {
-        return error.UnsupportedTensorDataType;
-    }
+
+    if (actual == @intFromEnum(onnx.TensorProto.DataType.FLOAT)) return .float32;
+    if (actual == @intFromEnum(onnx.TensorProto.DataType.INT64)) return .int64;
+    if (actual == @intFromEnum(onnx.TensorProto.DataType.INT32)) return .int32;
+    if (actual == @intFromEnum(onnx.TensorProto.DataType.UINT8)) return .uint8;
+    if (actual == @intFromEnum(onnx.TensorProto.DataType.BOOL)) return .bool;
+
+    return error.UnsupportedTensorDataType;
+}
+
+fn elementByteSize(dtype: tensor.DType) usize {
+    return switch (dtype) {
+        .float32 => @sizeOf(f32),
+        .int64 => @sizeOf(i64),
+        .int32 => @sizeOf(i32),
+        .uint8 => @sizeOf(u8),
+        .bool => @sizeOf(u8),
+    };
+}
+
+fn tensorFromRawData(
+    allocator: std.mem.Allocator,
+    dtype: tensor.DType,
+    shape: []const usize,
+    raw_data: []const u8,
+) !tensor.Tensor {
+    const count = try tensor.elementCount(shape);
+    const expected_bytes = try std.math.mul(usize, count, elementByteSize(dtype));
+    if (raw_data.len != expected_bytes) return error.TensorRawDataLengthMismatch;
+
+    return switch (dtype) {
+        .float32 => blk: {
+            const data = try allocator.alloc(f32, count);
+            defer allocator.free(data);
+            try fillFloat32FromRawData(data, raw_data);
+            break :blk tensor.Tensor.initFloat32(allocator, shape, data);
+        },
+        .int64 => blk: {
+            const data = try allocator.alloc(i64, count);
+            defer allocator.free(data);
+            try fillInt64FromRawData(data, raw_data);
+            break :blk tensor.Tensor.initInt64(allocator, shape, data);
+        },
+        .int32 => blk: {
+            const data = try allocator.alloc(i32, count);
+            defer allocator.free(data);
+            try fillInt32FromRawData(data, raw_data);
+            break :blk tensor.Tensor.initInt32(allocator, shape, data);
+        },
+        .uint8 => tensor.Tensor.initUint8(allocator, shape, raw_data),
+        .bool => blk: {
+            const data = try allocator.alloc(bool, count);
+            defer allocator.free(data);
+            for (data, raw_data) |*value, raw| {
+                value.* = raw != 0;
+            }
+            break :blk tensor.Tensor.initBool(allocator, shape, data);
+        },
+    };
+}
+
+fn checkedItems(comptime T: type, items: []const T, expected: usize) ![]const T {
+    if (items.len != expected) return error.TensorElementCountMismatch;
+    return items;
 }
 
 fn fillFloat32FromRawData(out: []f32, raw_data: []const u8) !void {
-    const expected_bytes = try std.math.mul(usize, out.len, @sizeOf(f32));
-    if (raw_data.len != expected_bytes) return error.TensorRawDataLengthMismatch;
+    if (raw_data.len != out.len * @sizeOf(f32)) return error.TensorRawDataLengthMismatch;
 
     for (out, 0..) |*value, index| {
         const offset = index * @sizeOf(f32);
@@ -308,6 +398,54 @@ fn fillFloat32FromRawData(out: []f32, raw_data: []const u8) !void {
             (@as(u32, raw_data[offset + 2]) << 16) |
             (@as(u32, raw_data[offset + 3]) << 24);
         value.* = @bitCast(bits);
+    }
+}
+
+fn fillInt64FromRawData(out: []i64, raw_data: []const u8) !void {
+    if (raw_data.len != out.len * @sizeOf(i64)) return error.TensorRawDataLengthMismatch;
+
+    for (out, 0..) |*value, index| {
+        const offset = index * @sizeOf(i64);
+        const bits =
+            @as(u64, raw_data[offset]) |
+            (@as(u64, raw_data[offset + 1]) << 8) |
+            (@as(u64, raw_data[offset + 2]) << 16) |
+            (@as(u64, raw_data[offset + 3]) << 24) |
+            (@as(u64, raw_data[offset + 4]) << 32) |
+            (@as(u64, raw_data[offset + 5]) << 40) |
+            (@as(u64, raw_data[offset + 6]) << 48) |
+            (@as(u64, raw_data[offset + 7]) << 56);
+        value.* = @bitCast(bits);
+    }
+}
+
+fn fillInt32FromRawData(out: []i32, raw_data: []const u8) !void {
+    if (raw_data.len != out.len * @sizeOf(i32)) return error.TensorRawDataLengthMismatch;
+
+    for (out, 0..) |*value, index| {
+        const offset = index * @sizeOf(i32);
+        const bits =
+            @as(u32, raw_data[offset]) |
+            (@as(u32, raw_data[offset + 1]) << 8) |
+            (@as(u32, raw_data[offset + 2]) << 16) |
+            (@as(u32, raw_data[offset + 3]) << 24);
+        value.* = @bitCast(bits);
+    }
+}
+
+fn fillUint8FromInt32Data(out: []u8, items: []const i32) !void {
+    if (items.len != out.len) return error.TensorElementCountMismatch;
+
+    for (out, items) |*value, item| {
+        value.* = std.math.cast(u8, item) orelse return error.InvalidTensorDataValue;
+    }
+}
+
+fn fillBoolFromInt32Data(out: []bool, items: []const i32) !void {
+    if (items.len != out.len) return error.TensorElementCountMismatch;
+
+    for (out, items) |*value, item| {
+        value.* = item != 0;
     }
 }
 
@@ -333,6 +471,46 @@ fn floatAttr(node: *const onnx.NodeProto, name: []const u8, default: f32) !f32 {
     }
 
     return default;
+}
+
+fn pairAttr(node: *const onnx.NodeProto, name: []const u8, default: [2]usize) ![2]usize {
+    for (node.attribute.items) |*attribute| {
+        if (attribute.name) |attribute_name| {
+            if (std.mem.eql(u8, attribute_name, name)) {
+                if (attribute.ints.items.len != 2) return error.InvalidAttributeLength;
+                return .{
+                    std.math.cast(usize, attribute.ints.items[0]) orelse return error.InvalidAttributeValue,
+                    std.math.cast(usize, attribute.ints.items[1]) orelse return error.InvalidAttributeValue,
+                };
+            }
+        }
+    }
+
+    return default;
+}
+
+fn padsAttr(node: *const onnx.NodeProto) ![4]usize {
+    for (node.attribute.items) |*attribute| {
+        if (attribute.name) |attribute_name| {
+            if (std.mem.eql(u8, attribute_name, "auto_pad")) {
+                if (attribute.s) |value| {
+                    if (!std.mem.eql(u8, value, "NOTSET")) return error.ConvAutoPadUnsupported;
+                }
+            }
+
+            if (std.mem.eql(u8, attribute_name, "pads")) {
+                if (attribute.ints.items.len != 4) return error.InvalidAttributeLength;
+                return .{
+                    std.math.cast(usize, attribute.ints.items[0]) orelse return error.InvalidAttributeValue,
+                    std.math.cast(usize, attribute.ints.items[1]) orelse return error.InvalidAttributeValue,
+                    std.math.cast(usize, attribute.ints.items[2]) orelse return error.InvalidAttributeValue,
+                    std.math.cast(usize, attribute.ints.items[3]) orelse return error.InvalidAttributeValue,
+                };
+            }
+        }
+    }
+
+    return .{ 0, 0, 0, 0 };
 }
 
 fn ensureDefaultDomain(node: *const onnx.NodeProto) !void {

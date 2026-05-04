@@ -2,8 +2,14 @@ const std = @import("std");
 const onnx = @import("proto/onnx.pb.zig");
 const tensor = @import("tensor.zig");
 const executor = @import("executor.zig");
+const capabilities = @import("capabilities.zig");
 
 const max_model_bytes = 100 * 1024 * 1024;
+
+const CliMode = enum {
+    run,
+    inspect,
+};
 
 const CliInput = struct {
     name: []const u8,
@@ -11,6 +17,7 @@ const CliInput = struct {
 };
 
 const CliArgs = struct {
+    mode: CliMode = .run,
     model_path: []const u8,
     inputs: std.ArrayList(CliInput) = .empty,
 
@@ -37,6 +44,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var model = try loadModel(cli.model_path, allocator);
     defer model.deinit(allocator);
+
+    if (cli.mode == .inspect) {
+        var report = try capabilities.analyze(allocator, &model);
+        defer report.deinit(allocator);
+
+        capabilities.print(report);
+        return;
+    }
 
     if (cli.inputs.items.len == 0) {
         printModelSummary(&model);
@@ -73,15 +88,34 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
 
     _ = args.skip();
 
-    const model_arg = args.next() orelse {
+    const first_arg = args.next() orelse {
         printUsage();
         return error.MissingModelPath;
     };
 
-    var cli = CliArgs {
-        .model_path = try allocator.dupe(u8, model_arg),
-    };
+    if (std.mem.eql(u8, first_arg, "inspect")) {
+        const model_arg = args.next() orelse {
+            printUsage();
+            return error.MissingModelPath;
+        };
 
+        var cli = CliArgs{
+            .mode = .inspect,
+            .model_path = try allocator.dupe(u8, model_arg),
+        };
+        errdefer cli.deinit(allocator);
+
+        if (args.next() != null) {
+            printUsage();
+            return error.UnknownArgument;
+        }
+
+        return cli;
+    }
+
+    var cli = CliArgs{
+        .model_path = try allocator.dupe(u8, first_arg),
+    };
     errdefer cli.deinit(allocator);
 
     while (args.next()) |arg| {
@@ -124,7 +158,12 @@ fn parseInputSpec(allocator: std.mem.Allocator, spec: []const u8) !CliInput {
 }
 
 fn printUsage() void {
-    std.debug.print("usage: zug <model.onnx> [--input name=file.f32]\n", .{});
+    std.debug.print(
+        \\usage:
+        \\  zug inspect <model.onnx>
+        \\  zug <model.onnx> [--input name=file.f32]
+        \\
+    , .{});
 }
 
 fn printModelSummary(model: *const onnx.ModelProto) void {
@@ -169,7 +208,7 @@ fn printTensor(name: []const u8, value: *const tensor.Tensor) void {
 
     std.debug.print(" = ", .{});
 
-    printValues(value.data);
+    printValues(value);
 
     std.debug.print("\n", .{});
 }
@@ -177,9 +216,12 @@ fn printTensor(name: []const u8, value: *const tensor.Tensor) void {
 fn printDType(dtype: tensor.DType) void {
     switch (dtype) {
         .float32 => std.debug.print("float32", .{}),
+        .int64 => std.debug.print("int64", .{}),
+        .int32 => std.debug.print("int32", .{}),
+        .uint8 => std.debug.print("uint8", .{}),
+        .bool => std.debug.print("bool", .{}),
     }
 }
-
 
 fn printShape(shape: []const usize) void {
     std.debug.print("[", .{});
@@ -192,8 +234,17 @@ fn printShape(shape: []const usize) void {
     std.debug.print("]", .{});
 }
 
+fn printValues(value: *const tensor.Tensor) void {
+    switch (value.data) {
+        .float32 => |values| printTypedValues(f32, values),
+        .int64 => |values| printTypedValues(i64, values),
+        .int32 => |values| printTypedValues(i32, values),
+        .uint8 => |values| printTypedValues(u8, values),
+        .bool => |values| printTypedValues(bool, values),
+    }
+}
 
-fn printValues(values: []const f32) void {
+fn printTypedValues(comptime T: type, values: []const T) void {
     const max_values = 64;
     const shown = @min(values.len, max_values);
 
@@ -201,7 +252,11 @@ fn printValues(values: []const f32) void {
 
     for (values[0..shown], 0..) |value, index| {
         if (index != 0) std.debug.print(", ", .{});
-        std.debug.print("{d}", .{value});
+        if (T == bool) {
+            std.debug.print("{any}", .{value});
+        } else {
+            std.debug.print("{d}", .{value});
+        }
     }
 
     if (values.len > shown) {
