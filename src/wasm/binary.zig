@@ -82,6 +82,66 @@ pub const Reader = struct {
         }
     }
 
+    pub fn readVarU64(self: *Reader) !u64 {
+        var result: u64 = 0;
+        var shift: u6 = 0;
+
+        while (true) {
+            const byte = try self.readByte();
+            result |= @as(u64, byte & 0x7f) << shift;
+
+            if ((byte & 0x80) == 0) return result;
+            if (shift >= 63) return error.InvalidVarInt;
+            shift += 7;
+        }
+    }
+
+    pub fn readVarI32(self: *Reader) !i32 {
+        var result: u32 = 0;
+        var shift: u5 = 0;
+
+        while (true) {
+            const byte = try self.readByte();
+            result |= @as(u32, byte & 0x7f) << shift;
+
+            if ((byte & 0x80) == 0) {
+                const bits_read: u6 = @as(u6, shift) + 7;
+                if (bits_read < 32 and (byte & 0x40) != 0) {
+                    const extend_shift: u5 = @intCast(bits_read);
+                    result |= ~@as(u32, 0) << extend_shift;
+                }
+
+                return @bitCast(result);
+            }
+
+            if (shift >= 28) return error.InvalidVarInt;
+            shift += 7;
+        }
+    }
+
+    pub fn readVarI64(self: *Reader) !i64 {
+        var result: u64 = 0;
+        var shift: u6 = 0;
+
+        while (true) {
+            const byte = try self.readByte();
+            result |= @as(u64, byte & 0x7f) << shift;
+
+            if ((byte & 0x80) == 0) {
+                const bits_read: u7 = @as(u7, shift) + 7;
+                if (bits_read < 64 and (byte & 0x40) != 0) {
+                    const extend_shift: u6 = @intCast(bits_read);
+                    result |= ~@as(u64, 0) << extend_shift;
+                }
+
+                return @bitCast(result);
+            }
+
+            if (shift >= 63) return error.InvalidVarInt;
+            shift += 7;
+        }
+    }
+
     pub fn readBytes(self: *Reader, len: u32) ![]const u8 {
         const start = self.offset;
         const byte_len = std.math.cast(usize, len) orelse return error.InvalidByteRange;
@@ -141,4 +201,13 @@ test "reader returns section payload slices" {
     try std.testing.expectEqual(SectionId.type, section.id);
     try std.testing.expectEqual(@as(usize, 0), section.payload.len);
     try std.testing.expect((try reader.nextSection()) == null);
+}
+
+test "reader decodes signed LEB integers" {
+    var i32_reader = Reader.init("\x7f\x9b\xf1\x59");
+    try std.testing.expectEqual(@as(i32, -1), try i32_reader.readVarI32());
+    try std.testing.expectEqual(@as(i32, -624485), try i32_reader.readVarI32());
+
+    var i64_reader = Reader.init("\x7e");
+    try std.testing.expectEqual(@as(i64, -2), try i64_reader.readVarI64());
 }

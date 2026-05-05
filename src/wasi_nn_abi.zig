@@ -4,6 +4,8 @@ const wasi_nn = @import("wasi_nn.zig");
 
 const max_model_bytes = 100 * 1024 * 1024;
 
+pub const Host = wasi_nn.Host;
+
 pub const Status = enum(u32) {
     ok = 0,
     invalid_memory = 1,

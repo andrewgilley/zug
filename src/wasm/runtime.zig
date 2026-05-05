@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const binary = @import("binary.zig");
+pub const fixtures = @import("fixtures.zig");
 pub const imports = @import("imports.zig");
 pub const instance = @import("instance.zig");
 pub const interpreter = @import("interpreter.zig");
@@ -26,6 +27,20 @@ pub const Runtime = struct {
     ) !instance.Instance {
         return instance.Instance.init(self.allocator, parsed_module, initial_memory_bytes);
     }
+
+    pub fn instantiateStarted(
+        self: Runtime,
+        parsed_module: *const module.Module,
+        initial_memory_bytes: usize,
+    ) !instance.Instance {
+        var wasm_instance = try self.instantiate(parsed_module, initial_memory_bytes);
+        errdefer wasm_instance.deinit();
+
+        var wasm_interpreter = interpreter.Interpreter.init(&wasm_instance);
+        try wasm_interpreter.runStart();
+
+        return wasm_instance;
+    }
 };
 
 test "runtime parses and instantiates an empty module" {
@@ -41,4 +56,24 @@ test "runtime parses and instantiates an empty module" {
 
     try wasm_instance.memory.writeU32(8, 7);
     try std.testing.expectEqual(@as(u32, 7), try wasm_instance.memory.readU32(8));
+}
+
+test "runtime instantiates and runs module start function" {
+    const allocator = std.testing.allocator;
+
+    const runtime = Runtime.init(allocator);
+
+    var parsed = try runtime.parseModule(fixtures.globals_and_start);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try runtime.instantiateStarted(&parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var wasm_interpreter = interpreter.Interpreter.init(&wasm_instance);
+    const result = (try wasm_interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 12), switch (result) {
+        .i32 => |value| value,
+        else => return error.ExpectedI32Value,
+    });
 }
