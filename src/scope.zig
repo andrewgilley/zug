@@ -29,8 +29,17 @@ pub const wasi_preview1_scope = [_][]const u8{
     "wasi_snapshot_preview1.environ_get",
     "wasi_snapshot_preview1.clock_time_get",
     "wasi_snapshot_preview1.random_get",
+    "wasi_snapshot_preview1.fd_close",
     "wasi_snapshot_preview1.fd_fdstat_get",
+    "wasi_snapshot_preview1.fd_filestat_get",
+    "wasi_snapshot_preview1.fd_prestat_get",
+    "wasi_snapshot_preview1.fd_prestat_dir_name",
+    "wasi_snapshot_preview1.fd_read",
+    "wasi_snapshot_preview1.fd_readdir",
+    "wasi_snapshot_preview1.fd_seek",
     "wasi_snapshot_preview1.fd_write",
+    "wasi_snapshot_preview1.path_filestat_get",
+    "wasi_snapshot_preview1.path_open",
     "wasi_snapshot_preview1.proc_exit",
 };
 
@@ -60,7 +69,7 @@ pub const next_capability_frontiers = [_][]const u8{
     "scratch-buffer reuse for steady-state model execution",
     "specialized Conv kernels for MobileNet-style depthwise and pointwise convolutions",
     "compiled ONNX execution plan with numeric tensor slots instead of per-node string lookup",
-    "broader WASI Preview 1 filesystem/preopen surface",
+    "broader WASI Preview 1 write policy and guest HTTP capability mapping",
     "official wasm spec-test ingestion for validation and interpreter coverage",
     "additional modern model gates for YOLO-style vision and small transformer graphs",
 };
@@ -96,6 +105,9 @@ test "scope import lists match resolver surface" {
     try std.testing.expect(wasm_imports.Resolver.resolve("zug_nn", "load_preloaded_graph") != null);
     try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "fd_write") != null);
     try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "random_get") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "path_open") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "fd_read") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "fd_readdir") != null);
 }
 
 test "scope includes active model compatibility surface" {

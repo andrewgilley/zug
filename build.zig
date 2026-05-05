@@ -146,6 +146,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    agent_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
     const workload_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/workload.zig"),

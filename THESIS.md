@@ -18,7 +18,7 @@ The project now has enough implementation to make the thesis concrete:
 - Tensor values are represented explicitly across several data types.
 - A growing ONNX operator set can run real small vision models.
 - WASM modules can be parsed, validated, instantiated, and interpreted across a meaningful core subset.
-- WASI Preview 1 imports support basic guest interaction such as args, environment, time, random, stdout/stderr writes, and process exit.
+- WASI Preview 1 imports support basic guest interaction such as args, environment, time, random, stdin/stdout/stderr, descriptor stat/close/seek, preopen discovery, readonly directory iteration, readonly file open/read/stat, and process exit.
 - A WASI-NN shaped ABI can drive host-managed graph execution.
 - Guest WASM fixtures can call into the host ML surface.
 - Workload manifests can describe a bundle of guest code, model assets, target requirements, and network needs.

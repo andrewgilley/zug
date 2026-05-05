@@ -652,7 +652,10 @@ fn printUsage() void {
         \\  --model-offset also writes that model into guest memory for legacy guests
         \\
         \\agent:
-        \\  serves GET /health and GET /capabilities over HTTP
+        \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads over HTTP
+        \\  POST /workloads/check with {{"path":"workload/"}} returns compatibility JSON
+        \\  POST /workloads/deploy with {{"path":"workload/"}} registers a supported workload
+        \\  POST /workloads/<id>/invoke runs a registered workload entrypoint with optional {{"args":[i32],"stdin":"..."}}
         \\  --once accepts one TCP request and then exits
         \\
     , .{});

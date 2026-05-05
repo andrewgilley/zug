@@ -820,9 +820,9 @@
 11370 182395784908512824 1777942913693238200 80c4df7f5d88b0905d694e3e28696aea 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\manifest.zig
 2786 93449692267969063 1777943342953823200 e72cd0237a5167c649562331d51c50e4 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\runtime.zig
 6073 44754521297029109 1777936660985086400 ee11c370d5f49786d15bec7976e278f4 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\binary.zig
-21906 15762598696089613 1777947264143570600 b8e4dfa7b57b27f55583d39710c6cc0b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\imports.zig
+51437 15762598696089613 1777998612197851000 9120d9d78d74a7f31045ac7bde00cf56 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\imports.zig
 27771 11821949022140433 1777993570386588400 a899e0721618580eeb04f43d7c0efb89 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\module.zig
-4977 90353467524215486 1777990442845118800 1b04cbc987416eecabe0c31f74e9b386 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\scope.zig
+5699 90353467524215486 1777998628696032000 4b833c6347cdab36f311b90a9f24c093 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\scope.zig
 14868 158751886864812938 1777994026071767800 de801f1c5a4c225e924fb01f9ca5bd02 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\fixtures.zig
 29719 8444249301612565 1777993910029561600 02c1f41418ead6d3f5bf5df6436ae82e 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\instance.zig
 117057 7599824371480616 1777993919866091700 ef653274261fa67a492ced68e1b16f97 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\interpreter.zig

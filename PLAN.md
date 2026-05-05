@@ -27,7 +27,7 @@ Implemented project surfaces:
 - WASM validation for the supported MVP surface.
 - WASM instantiation with linear memory, exports, imports, globals, tables, data segments, element segments, and start functions.
 - An interpreter with substantial scalar instruction coverage, control flow, function calls, imports, memory operations, and table dispatch.
-- WASI Preview 1 host support for args, environment, clock, random, fd stat, fd write, and process exit.
+- WASI Preview 1 host support for args, environment, clock, random, fd stat, fd read/write, descriptor close/seek, preopen discovery, readonly directory iteration, readonly path stat/open, and process exit.
 - A WASI-NN shaped host and ABI surface for graph loading, execution context creation, input binding, compute, output descriptors, and output reads.
 - Guest WASM fixtures that exercise basic execution, WASI logging, and WASI-NN driven inference.
 - Workload manifests through `zug.toml`, target profiles, network requirements, and `zug check workload/`.
@@ -88,8 +88,17 @@ Implemented WASI Preview 1 imports:
 - `environ_get`
 - `clock_time_get`
 - `random_get`
+- `fd_close`
 - `fd_fdstat_get`
+- `fd_filestat_get`
+- `fd_prestat_get`
+- `fd_prestat_dir_name`
+- `fd_read`
+- `fd_readdir`
+- `fd_seek`
 - `fd_write`
+- `path_filestat_get`
+- `path_open`
 - `proc_exit`
 
 Implemented WASI-NN shaped imports:
@@ -105,7 +114,7 @@ Implemented host extension:
 
 - `zug_nn.load_preloaded_graph`
 
-The near-term WASI target is not broad POSIX compatibility. It is enough stable host capability surface for model-backed WASM workloads. The next WASI expansion should focus on filesystem/preopen support, HTTP-oriented guest networking, and capability restrictions.
+The near-term WASI target is not broad POSIX compatibility. It is enough stable host capability surface for model-backed WASM workloads. The current filesystem slice is intentionally controlled: stdin reads, preopen discovery, readonly directory iteration, and readonly file open/read/stat through host-configured resources. The next WASI expansion should focus on file write policy, HTTP-oriented guest networking, and stronger capability restrictions.
 
 ## Workloads And Networking
 
@@ -147,7 +156,7 @@ The highest-value next development slices are:
 1. Add `POST /workloads/check` to the agent so a remote caller can ask whether a workload is accepted by a node profile.
 2. Add a local `zug run workload/` path that loads the manifest, guest, model, WASI-NN surface, and runtime configuration from one directory.
 3. Add `POST /workloads/run` only after the local workload run path is stable.
-4. Expand WASI Preview 1 toward preopened directories and controlled file reads.
+4. Expand WASI Preview 1 from readonly preopens into file write policy and guest HTTP capability mapping.
 5. Ingest official WASM spec tests for the supported instruction surface.
 6. Improve ONNX performance with execution planning, tensor slot indexing, scratch-buffer reuse, and optimized Conv variants.
 7. Add conformance fixtures for MobileNetV2, YOLOv8n, and a small transformer-style model.

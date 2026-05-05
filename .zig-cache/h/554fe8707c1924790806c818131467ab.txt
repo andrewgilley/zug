@@ -819,14 +819,14 @@
 79580 30117822508434998 1777842116607567300 805b5fe2267a9de17d1319b61b52426b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\proto\onnx.pb.zig
 12347 80501843339290006 1777990025163461200 4f851a43bbd22e7888e25f14ff9d16a9 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\capabilities.zig
 7340 79094468455790561 1777995338139306800 280f3afeeaf58d8c7bf92c59cf2d3535 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\network.zig
-4977 90353467524215486 1777990442845118800 1b04cbc987416eecabe0c31f74e9b386 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\scope.zig
+5699 90353467524215486 1777998628696032000 4b833c6347cdab36f311b90a9f24c093 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\scope.zig
 4016 96264442035060407 1777995351278921600 dbf3db7fd409ac152c8cffcfb6c66874 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\target.zig
 13100 266556802944992333 1777995368882895800 8d6ce191ff5a65407cc8af47c6841d2e 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\workload.zig
 44643 4785074604889985 1777993945256942800 66e3770abdd88131780dbe29b1ea8357 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\compatibility.zig
 11370 182395784908512824 1777942913693238200 80c4df7f5d88b0905d694e3e28696aea 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\manifest.zig
 27771 11821949022140433 1777993570386588400 a899e0721618580eeb04f43d7c0efb89 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\module.zig
 46076 11821949022081193 1777830627783192700 be26b79f5922619d7e5a97b4d2c1469f 0 C:\Users\andre\Desktop\Dev\code\zig\zug\zig-pkg\protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1\src\protobuf.zig
-21906 15762598696089613 1777947264143570600 b8e4dfa7b57b27f55583d39710c6cc0b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\imports.zig
+51437 15762598696089613 1777998612197851000 9120d9d78d74a7f31045ac7bde00cf56 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\imports.zig
 6073 44754521297029109 1777936660985086400 ee11c370d5f49786d15bec7976e278f4 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\binary.zig
 2786 93449692267969063 1777943342953823200 e72cd0237a5167c649562331d51c50e4 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\runtime.zig
 14868 158751886864812938 1777994026071767800 de801f1c5a4c225e924fb01f9ca5bd02 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\fixtures.zig
