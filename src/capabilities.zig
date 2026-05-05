@@ -41,26 +41,44 @@ pub const supported_operator_names = [_][]const u8{
     "Clip",
     "Concat",
     "Constant",
+    "ConstantOfShape",
     "Conv",
     "Div",
+    "Equal",
+    "Expand",
     "Flatten",
     "Gather",
     "Gemm",
     "GlobalAveragePool",
+    "Greater",
+    "Identity",
+    "LeakyRelu",
+    "Less",
     "MatMul",
     "MaxPool",
     "Mul",
+    "Pad",
+    "Pow",
+    "Reciprocal",
     "Relu",
+    "ReduceMax",
+    "ReduceMean",
+    "ReduceSum",
     "Reshape",
+    "Resize",
     "Shape",
     "Sigmoid",
     "Slice",
     "Softmax",
+    "Split",
+    "Sqrt",
     "Sub",
     "Squeeze",
     "Tanh",
+    "TopK",
     "Transpose",
     "Unsqueeze",
+    "Where",
 };
 
 pub const supported_tensor_dtype_names = [_][]const u8{
@@ -199,11 +217,11 @@ fn inspectNode(allocator: std.mem.Allocator, report: *Report, node: *const onnx.
         });
     }
 
-    if (node.output.items.len != 1) {
+    if (!operatorSupportsOutputCount(op_type, node.output.items.len)) {
         try report.issues.append(allocator, .{
             .kind = .multi_output_node,
             .subject = node.name orelse op_type,
-            .detail = "executor currently expects one output per node",
+            .detail = "operator output count is outside executor support",
         });
     }
 }
@@ -348,6 +366,13 @@ pub fn isSupportedOperator(domain: []const u8, op_type: []const u8) bool {
     }
 
     return false;
+}
+
+fn operatorSupportsOutputCount(op_type: []const u8, output_count: usize) bool {
+    if (std.mem.eql(u8, op_type, "Split")) return output_count > 0;
+    if (std.mem.eql(u8, op_type, "TopK")) return output_count == 2;
+
+    return output_count == 1;
 }
 
 pub fn isSupportedTensorDataType(data_type: ?i32) bool {

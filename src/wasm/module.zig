@@ -41,6 +41,7 @@ pub const ValueType = enum(u8) {
     i64 = 0x7e,
     f32 = 0x7d,
     f64 = 0x7c,
+    v128 = 0x7b,
 };
 
 pub const FunctionType = struct {
@@ -53,6 +54,7 @@ pub const ConstValue = union(enum) {
     i64: u64,
     f32: f32,
     f64: f64,
+    v128: [16]u8,
 };
 
 pub const Function = struct {
@@ -445,6 +447,7 @@ fn valueTypeFromByte(value: u8) !ValueType {
         0x7e => .i64,
         0x7d => .f32,
         0x7c => .f64,
+        0x7b => .v128,
         else => error.UnsupportedValueType,
     };
 }
@@ -494,6 +497,14 @@ fn readConstExpr(reader: *binary.Reader, expected_type: ValueType) !ConstValue {
         0x44 => blk: {
             if (expected_type != .f64) return error.InvalidConstExpressionType;
             break :blk .{ .f64 = @bitCast(readU64Little(try reader.readBytes(8))) };
+        },
+        0xfd => blk: {
+            const subopcode = try reader.readVarU32();
+            if (subopcode != 0x0c) return error.UnsupportedConstExpression;
+            if (expected_type != .v128) return error.InvalidConstExpressionType;
+            var bytes: [16]u8 = undefined;
+            @memcpy(bytes[0..], try reader.readBytes(16));
+            break :blk .{ .v128 = bytes };
         },
         else => return error.UnsupportedConstExpression,
     };

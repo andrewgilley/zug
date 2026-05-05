@@ -9,6 +9,7 @@ const check = @import("check.zig");
 const scope = @import("scope.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
+const wasm_compatibility = @import("wasm/compatibility.zig");
 const wasm_imports = @import("wasm/imports.zig");
 const wasm_interpreter = @import("wasm/interpreter.zig");
 const wasm_manifest = @import("wasm/manifest.zig");
@@ -56,6 +57,7 @@ const CliArgs = struct {
     bench_trace: bool = false,
     check_kind: check.ArtifactKind = .auto,
     check_memory_bytes: ?usize = null,
+    check_output_format: check.OutputFormat = .text,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         allocator.free(self.model_path);
@@ -108,6 +110,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .model_path = cli.wasm_model_path,
             .export_name = cli.wasm_export_name,
             .initial_memory_bytes = cli.check_memory_bytes,
+            .output_format = cli.check_output_format,
         });
         if (!ok) std.process.exit(1);
         return;
@@ -271,6 +274,11 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
                 };
 
                 cli.check_memory_bytes = try check.parseByteCount(value);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--json")) {
+                cli.check_output_format = .json;
                 continue;
             }
 
@@ -538,7 +546,7 @@ fn printUsage() void {
     std.debug.print(
         \\usage:
         \\  zug scope
-        \\  zug check <file.onnx|file.wasm> [--kind auto|onnx|wasm] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes]
+        \\  zug check <file.onnx|file.wasm> [--kind auto|onnx|wasm] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
         \\  zug bench <model.onnx> --input name=file.f32 [--warmup count] [--iterations count] [--format text|json] [--trace]
         \\  zug <model.onnx> [--input name=file.f32] [--output name=file.raw] [--expect name=file.raw] [--tolerance value]
@@ -987,6 +995,19 @@ fn runWasmModule(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
         "run";
 
     const initial_memory_bytes = try wasmInitialMemoryBytes(cli, model_bytes, manifest);
+
+    var compatibility_report = try wasm_compatibility.analyzeModule(allocator, bytes, &parsed, .{}, .{
+        .initial_memory_bytes = initial_memory_bytes,
+        .export_name = export_name,
+    });
+    defer compatibility_report.deinit(allocator);
+
+    if (!compatibility_report.supported()) {
+        std.debug.print("zug wasm compatibility: fail\n", .{});
+        compatibility_report.print();
+        return error.WasmCompatibilityCheckFailed;
+    }
+
     if (manifest) |loaded| {
         try loaded.validate(&parsed, .{
             .max_model_bytes = max_model_bytes,
@@ -1096,6 +1117,12 @@ fn printWasmResult(result: ?wasm_interpreter.Value) void {
             .i64 => |actual| std.debug.print("i64 {d}", .{@as(i64, @bitCast(actual))}),
             .f32 => |actual| std.debug.print("f32 {d}", .{actual}),
             .f64 => |actual| std.debug.print("f64 {d}", .{actual}),
+            .v128 => |actual| {
+                std.debug.print("v128", .{});
+                for (actual) |byte| {
+                    std.debug.print(" {x:0>2}", .{byte});
+                }
+            },
         }
     } else {
         std.debug.print("<none>", .{});

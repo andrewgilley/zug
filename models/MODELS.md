@@ -25,6 +25,19 @@ This file tracks modern model targets for capability inspection, ONNX op coverag
 - Expected pressure on Zug: Conv, Relu, MaxPool, Concat, Dropout pass-through or removal, Softmax.
 - Status: candidate, not vendored.
 
+### YOLOv8n ONNX
+
+- Source: https://huggingface.co/webml/yolov8n
+- Download hint: https://huggingface.co/webml/yolov8n/resolve/main/onnx/yolov8n.onnx
+- Why it matters: compact modern object detection graph with convolutional feature extraction, detection-head reshape/split/concat patterns, resize, sigmoid activations, and post-head tensor layout transforms.
+- Expected input shape: `images` as float32 `[1,3,640,640]`.
+- Observed operators: Conv x64, Sigmoid x58, Mul x60, Constant x22, Split x9, Add x9, Concat x19, MaxPool x3, Resize x2, Reshape x5, Transpose x1, Softmax x1, Shape x1, Gather x1, Div x2, Slice x2, Sub x2.
+- Current Zug coverage: all observed operators are recognized as supported.
+- Execution smoke test: `zig build run -- models\yolov8n.onnx --input images=tmp\yolov8n-zero.f32 --output output0=tmp\yolov8n-zero-output.f32`
+- Smoke test result: produces `output0 float32[1,84,8400]` from a zero-filled input and writes `tmp\yolov8n-zero-output.f32`.
+- Remaining issues: this is a zero-input execution smoke test, not an accuracy or ONNX Runtime conformance comparison yet.
+- Status: downloaded at `models/yolov8n.onnx`.
+
 ### Tiny Random ViT ONNX
 
 - Source: https://huggingface.co/optimum-intel-internal-testing/tiny-random-vit

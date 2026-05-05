@@ -96,6 +96,16 @@ pub const Executor = struct {
 
         const op_type = node.op_type orelse return error.MissingOpType;
 
+        if (std.mem.eql(u8, op_type, "Split")) {
+            try self.runSplit(node);
+            return;
+        }
+
+        if (std.mem.eql(u8, op_type, "TopK")) {
+            try self.runTopK(node);
+            return;
+        }
+
         if (node.output.items.len < 1 or node.output.items[0].len == 0) {
             return error.InvalidNodeOutput;
         }
@@ -133,6 +143,9 @@ pub const Executor = struct {
             break :blk try ops.cast(self.allocator, input, try dtypeFromOnnx(to));
         } else if (std.mem.eql(u8, op_type, "Constant")) blk: {
             break :blk try ops.constant(self.allocator, node);
+        } else if (std.mem.eql(u8, op_type, "ConstantOfShape")) blk: {
+            const shape = try self.requiredNodeInput(node, 0);
+            break :blk try ops.constantOfShape(self.allocator, shape, try optionalTensorAttr(node, "value"));
         } else if (std.mem.eql(u8, op_type, "Conv")) blk: {
             const x = try self.requiredNodeInput(node, 0);
             const w = try self.requiredNodeInput(node, 1);
@@ -165,6 +178,14 @@ pub const Executor = struct {
             const a = try self.requiredNodeInput(node, 0);
             const b = try self.requiredNodeInput(node, 1);
             break :blk try ops.div(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Equal")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.equal(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Expand")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            const shape = try self.requiredNodeInput(node, 1);
+            break :blk try ops.expand(self.allocator, input, shape);
         } else if (std.mem.eql(u8, op_type, "Flatten")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             const axis = try intAttr(node, "axis", 1);
@@ -188,6 +209,20 @@ pub const Executor = struct {
         } else if (std.mem.eql(u8, op_type, "GlobalAveragePool")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             break :blk try ops.globalAveragePool(self.allocator, input);
+        } else if (std.mem.eql(u8, op_type, "Greater")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.greater(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Identity")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            break :blk try ops.identity(self.allocator, input);
+        } else if (std.mem.eql(u8, op_type, "LeakyRelu")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            break :blk try ops.leakyRelu(self.allocator, input, try floatAttr(node, "alpha", 0.01));
+        } else if (std.mem.eql(u8, op_type, "Less")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.less(self.allocator, a, b);
         } else if (std.mem.eql(u8, op_type, "MatMul")) blk: {
             const a = try self.requiredNodeInput(node, 0);
             const b = try self.requiredNodeInput(node, 1);
@@ -204,14 +239,88 @@ pub const Executor = struct {
             const a = try self.requiredNodeInput(node, 0);
             const b = try self.requiredNodeInput(node, 1);
             break :blk try ops.mul(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Pad")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            const pads = try self.requiredNodeInput(node, 1);
+            const constant_value = try self.optionalNodeInput(node, 2);
+            if (try self.optionalNodeInput(node, 3) != null) return error.PadAxesUnsupported;
+            break :blk try ops.pad(self.allocator, input, pads, constant_value, .{
+                .mode = try padModeAttr(node),
+            });
+        } else if (std.mem.eql(u8, op_type, "Pow")) blk: {
+            const a = try self.requiredNodeInput(node, 0);
+            const b = try self.requiredNodeInput(node, 1);
+            break :blk try ops.pow(self.allocator, a, b);
+        } else if (std.mem.eql(u8, op_type, "Reciprocal")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            break :blk try ops.reciprocal(self.allocator, input);
         } else if (std.mem.eql(u8, op_type, "Relu")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             break :blk try ops.relu(self.allocator, input);
+        } else if (std.mem.eql(u8, op_type, "ReduceMax")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            var axes: ?[]i64 = null;
+            if (try self.optionalNodeInput(node, 1)) |axes_tensor| {
+                axes = try tensorIntList(self.allocator, axes_tensor);
+            } else {
+                axes = try optionalIntListAttr(self.allocator, node, "axes");
+            }
+            defer if (axes) |items| self.allocator.free(items);
+
+            break :blk try ops.reduceMax(
+                self.allocator,
+                input,
+                axes,
+                (try intAttr(node, "keepdims", 1)) != 0,
+                (try intAttr(node, "noop_with_empty_axes", 0)) != 0,
+            );
+        } else if (std.mem.eql(u8, op_type, "ReduceMean")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            var axes: ?[]i64 = null;
+            if (try self.optionalNodeInput(node, 1)) |axes_tensor| {
+                axes = try tensorIntList(self.allocator, axes_tensor);
+            } else {
+                axes = try optionalIntListAttr(self.allocator, node, "axes");
+            }
+            defer if (axes) |items| self.allocator.free(items);
+
+            break :blk try ops.reduceMean(
+                self.allocator,
+                input,
+                axes,
+                (try intAttr(node, "keepdims", 1)) != 0,
+                (try intAttr(node, "noop_with_empty_axes", 0)) != 0,
+            );
+        } else if (std.mem.eql(u8, op_type, "ReduceSum")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            var axes: ?[]i64 = null;
+            if (try self.optionalNodeInput(node, 1)) |axes_tensor| {
+                axes = try tensorIntList(self.allocator, axes_tensor);
+            } else {
+                axes = try optionalIntListAttr(self.allocator, node, "axes");
+            }
+            defer if (axes) |items| self.allocator.free(items);
+
+            break :blk try ops.reduceSum(
+                self.allocator,
+                input,
+                axes,
+                (try intAttr(node, "keepdims", 1)) != 0,
+                (try intAttr(node, "noop_with_empty_axes", 0)) != 0,
+            );
         } else if (std.mem.eql(u8, op_type, "Reshape")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             const shape = try self.requiredNodeInput(node, 1);
             const allow_zero = (try intAttr(node, "allowzero", 0)) != 0;
             break :blk try ops.reshape(self.allocator, input, shape, allow_zero);
+        } else if (std.mem.eql(u8, op_type, "Resize")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            _ = try self.optionalNodeInput(node, 1);
+            const scales = try self.optionalNodeInput(node, 2);
+            const sizes = try self.optionalNodeInput(node, 3);
+            break :blk try ops.resize(self.allocator, input, scales, sizes, .{
+                .mode = try resizeModeAttr(node),
+            });
         } else if (std.mem.eql(u8, op_type, "Shape")) blk: {
             const input = try self.requiredNodeInput(node, 0);
             break :blk try ops.shapeTensor(self.allocator, input);
@@ -229,6 +338,9 @@ pub const Executor = struct {
             const input = try self.requiredNodeInput(node, 0);
             const axis = try intAttr(node, "axis", -1);
             break :blk try ops.softmax(self.allocator, input, axis);
+        } else if (std.mem.eql(u8, op_type, "Sqrt")) blk: {
+            const input = try self.requiredNodeInput(node, 0);
+            break :blk try ops.sqrt(self.allocator, input);
         } else if (std.mem.eql(u8, op_type, "Sub")) blk: {
             const a = try self.requiredNodeInput(node, 0);
             const b = try self.requiredNodeInput(node, 1);
@@ -253,14 +365,88 @@ pub const Executor = struct {
             break :blk try ops.transpose(self.allocator, input, perm);
         } else if (std.mem.eql(u8, op_type, "Unsqueeze")) blk: {
             const input = try self.requiredNodeInput(node, 0);
-            const axes = try intListAttr(self.allocator, node, "axes");
-            defer self.allocator.free(axes);
-            break :blk try ops.unsqueeze(self.allocator, input, axes);
+            var axes: ?[]i64 = null;
+            if (try self.optionalNodeInput(node, 1)) |axes_tensor| {
+                axes = try tensorIntList(self.allocator, axes_tensor);
+            } else {
+                axes = try intListAttr(self.allocator, node, "axes");
+            }
+            defer if (axes) |items| self.allocator.free(items);
+            break :blk try ops.unsqueeze(self.allocator, input, axes.?);
+        } else if (std.mem.eql(u8, op_type, "Where")) blk: {
+            const condition = try self.requiredNodeInput(node, 0);
+            const x = try self.requiredNodeInput(node, 1);
+            const y = try self.requiredNodeInput(node, 2);
+            break :blk try ops.where(self.allocator, condition, x, y);
         } else {
             return error.UnsupportedOperator;
         };
 
         try self.put(output_name, result);
+    }
+
+    fn runSplit(self: *Executor, node: *const onnx.NodeProto) !void {
+        if (node.output.items.len == 0) return error.InvalidNodeOutput;
+        for (node.output.items) |output_name| {
+            if (output_name.len == 0) return error.InvalidNodeOutput;
+        }
+
+        const input = try self.requiredNodeInput(node, 0);
+        const split_sizes = try self.optionalNodeInput(node, 1);
+        const axis = try intAttr(node, "axis", 0);
+
+        var result = try ops.split(self.allocator, input, split_sizes, axis, node.output.items.len);
+        var next_unowned: usize = 0;
+        errdefer {
+            for (result.outputs[next_unowned..]) |*output| {
+                output.deinit(self.allocator);
+            }
+            self.allocator.free(result.outputs);
+        }
+
+        for (node.output.items, 0..) |output_name, index| {
+            const value = result.outputs[index];
+            result.outputs[index] = undefined;
+            next_unowned = index + 1;
+            try self.put(output_name, value);
+        }
+
+        self.allocator.free(result.outputs);
+    }
+
+    fn runTopK(self: *Executor, node: *const onnx.NodeProto) !void {
+        if (node.output.items.len != 2 or node.output.items[0].len == 0 or node.output.items[1].len == 0) {
+            return error.InvalidNodeOutput;
+        }
+
+        const input = try self.requiredNodeInput(node, 0);
+        const k = try self.requiredNodeInput(node, 1);
+
+        var result = try ops.topK(
+            self.allocator,
+            input,
+            k,
+            try intAttr(node, "axis", -1),
+            (try intAttr(node, "largest", 1)) != 0,
+            (try intAttr(node, "sorted", 1)) != 0,
+        );
+
+        var values_owned = true;
+        var indices_owned = true;
+        errdefer {
+            if (values_owned) result.values.deinit(self.allocator);
+            if (indices_owned) result.indices.deinit(self.allocator);
+        }
+
+        const values = result.values;
+        result.values = undefined;
+        values_owned = false;
+        try self.put(node.output.items[0], values);
+
+        const indices = result.indices;
+        result.indices = undefined;
+        indices_owned = false;
+        try self.put(node.output.items[1], indices);
     }
 
     fn put(self: *Executor, name: []const u8, value: tensor.Tensor) !void {
@@ -676,6 +862,44 @@ fn optionalFloatAttr(node: *const onnx.NodeProto, name: []const u8) !?f32 {
     }
 
     return null;
+}
+
+fn optionalTensorAttr(node: *const onnx.NodeProto, name: []const u8) !?*const onnx.TensorProto {
+    for (node.attribute.items) |*attribute| {
+        if (attribute.name) |attribute_name| {
+            if (std.mem.eql(u8, attribute_name, name)) {
+                return if (attribute.t) |*value| value else error.InvalidTensorAttribute;
+            }
+        }
+    }
+
+    return null;
+}
+
+fn stringAttr(node: *const onnx.NodeProto, name: []const u8, default: []const u8) ![]const u8 {
+    for (node.attribute.items) |*attribute| {
+        if (attribute.name) |attribute_name| {
+            if (std.mem.eql(u8, attribute_name, name)) {
+                return attribute.s orelse error.InvalidStringAttribute;
+            }
+        }
+    }
+
+    return default;
+}
+
+fn padModeAttr(node: *const onnx.NodeProto) !ops.PadMode {
+    const mode = try stringAttr(node, "mode", "constant");
+    if (std.mem.eql(u8, mode, "constant")) return .constant;
+
+    return error.PadModeUnsupported;
+}
+
+fn resizeModeAttr(node: *const onnx.NodeProto) !ops.ResizeMode {
+    const mode = try stringAttr(node, "mode", "nearest");
+    if (std.mem.eql(u8, mode, "nearest")) return .nearest;
+
+    return error.ResizeModeUnsupported;
 }
 
 fn intListAttr(

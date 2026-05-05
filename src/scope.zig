@@ -102,6 +102,6 @@ test "scope includes active model compatibility surface" {
     try std.testing.expect(capabilities.isSupportedOperator("ai.onnx", "Conv"));
     try std.testing.expect(capabilities.isSupportedOperator("ai.onnx", "Gemm"));
     try std.testing.expect(capabilities.isSupportedOperator("ai.onnx", "Softmax"));
-    try std.testing.expectEqual(@as(usize, 27), capabilities.supported_operator_names.len);
+    try std.testing.expectEqual(@as(usize, 45), capabilities.supported_operator_names.len);
     try std.testing.expectEqual(@as(usize, 5), capabilities.supported_tensor_dtype_names.len);
 }

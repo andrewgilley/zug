@@ -28,6 +28,59 @@ pub const BatchNormOptions = struct {
     epsilon: f32 = 0.00001,
 };
 
+pub const ResizeMode = enum {
+    nearest,
+};
+
+pub const ResizeOptions = struct {
+    mode: ResizeMode = .nearest,
+};
+
+pub const PadMode = enum {
+    constant,
+};
+
+pub const PadOptions = struct {
+    mode: PadMode = .constant,
+};
+
+const ReduceKind = enum {
+    mean,
+    sum,
+    max,
+};
+
+const NumericBinaryOp = enum {
+    add,
+    sub,
+    mul,
+    div,
+    pow,
+};
+
+pub const SplitResult = struct {
+    outputs: []tensor.Tensor,
+
+    pub fn deinit(self: *SplitResult, allocator: std.mem.Allocator) void {
+        for (self.outputs) |*output| {
+            output.deinit(allocator);
+        }
+        allocator.free(self.outputs);
+        self.* = undefined;
+    }
+};
+
+pub const TopKResult = struct {
+    values: tensor.Tensor,
+    indices: tensor.Tensor,
+
+    pub fn deinit(self: *TopKResult, allocator: std.mem.Allocator) void {
+        self.values.deinit(allocator);
+        self.indices.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn constant(allocator: std.mem.Allocator, node: *const onnx.NodeProto) !tensor.Tensor {
     if (node.input.items.len != 0) return error.ConstantUnexpectedInputs;
 
@@ -61,12 +114,42 @@ pub fn constant(allocator: std.mem.Allocator, node: *const onnx.NodeProto) !tens
     return error.MissingConstantValue;
 }
 
+pub fn constantOfShape(
+    allocator: std.mem.Allocator,
+    shape_tensor: *const tensor.Tensor,
+    maybe_value: ?*const onnx.TensorProto,
+) !tensor.Tensor {
+    const shape = try tensorToUsizeList(allocator, shape_tensor);
+    errdefer allocator.free(shape);
+    const count = try tensor.elementCount(shape);
+
+    if (maybe_value) |value_proto| {
+        var value = try tensorFromTensorProto(allocator, value_proto);
+        defer value.deinit(allocator);
+        if (!isScalar(&value)) return error.ConstantOfShapeValueMustBeScalar;
+
+        return switch (value.data) {
+            .float32 => |items| try filledTensor(f32, allocator, shape, count, items[0], tensor.Tensor.initOwnedFloat32),
+            .int64 => |items| try filledTensor(i64, allocator, shape, count, items[0], tensor.Tensor.initOwnedInt64),
+            .int32 => |items| try filledTensor(i32, allocator, shape, count, items[0], tensor.Tensor.initOwnedInt32),
+            .uint8 => |items| try filledTensor(u8, allocator, shape, count, items[0], tensor.Tensor.initOwnedUint8),
+            .bool => |items| try filledTensor(bool, allocator, shape, count, items[0], tensor.Tensor.initOwnedBool),
+        };
+    }
+
+    return filledTensor(f32, allocator, shape, count, 0, tensor.Tensor.initOwnedFloat32);
+}
+
+pub fn identity(allocator: std.mem.Allocator, input: *const tensor.Tensor) !tensor.Tensor {
+    return cloneWithShape(allocator, input, input.shape);
+}
+
 pub fn add(
     allocator: std.mem.Allocator,
     a: *const tensor.Tensor,
     b: *const tensor.Tensor,
 ) !tensor.Tensor {
-    return elementwiseBinary(allocator, a, b, addFloat);
+    return elementwiseBinary(allocator, a, b, .add);
 }
 
 pub fn sub(
@@ -74,7 +157,7 @@ pub fn sub(
     a: *const tensor.Tensor,
     b: *const tensor.Tensor,
 ) !tensor.Tensor {
-    return elementwiseBinary(allocator, a, b, subFloat);
+    return elementwiseBinary(allocator, a, b, .sub);
 }
 
 pub fn mul(
@@ -82,7 +165,7 @@ pub fn mul(
     a: *const tensor.Tensor,
     b: *const tensor.Tensor,
 ) !tensor.Tensor {
-    return elementwiseBinary(allocator, a, b, mulFloat);
+    return elementwiseBinary(allocator, a, b, .mul);
 }
 
 pub fn div(
@@ -90,11 +173,64 @@ pub fn div(
     a: *const tensor.Tensor,
     b: *const tensor.Tensor,
 ) !tensor.Tensor {
-    return elementwiseBinary(allocator, a, b, divFloat);
+    return elementwiseBinary(allocator, a, b, .div);
+}
+
+pub fn pow(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+) !tensor.Tensor {
+    return elementwiseBinary(allocator, a, b, .pow);
+}
+
+pub fn greater(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+) !tensor.Tensor {
+    return elementwiseCompare(allocator, a, b, greaterThan);
+}
+
+pub fn less(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+) !tensor.Tensor {
+    return elementwiseCompare(allocator, a, b, lessThan);
+}
+
+pub fn equal(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+) !tensor.Tensor {
+    return elementwiseEqual(allocator, a, b);
+}
+
+pub fn reciprocal(allocator: std.mem.Allocator, input: *const tensor.Tensor) !tensor.Tensor {
+    return elementwiseUnary(allocator, input, reciprocalFloat);
+}
+
+pub fn sqrt(allocator: std.mem.Allocator, input: *const tensor.Tensor) !tensor.Tensor {
+    return elementwiseUnary(allocator, input, sqrtFloat);
 }
 
 pub fn relu(allocator: std.mem.Allocator, input: *const tensor.Tensor) !tensor.Tensor {
     return elementwiseUnary(allocator, input, reluFloat);
+}
+
+pub fn leakyRelu(allocator: std.mem.Allocator, input: *const tensor.Tensor, alpha: f32) !tensor.Tensor {
+    const input_data = try input.float32Data();
+    var output = try tensor.Tensor.initZeros(allocator, input.shape);
+    errdefer output.deinit(allocator);
+    const output_data = try output.float32DataMut();
+
+    for (output_data, input_data) |*out, value| {
+        out.* = if (value < 0) value * alpha else value;
+    }
+
+    return output;
 }
 
 pub fn sigmoid(allocator: std.mem.Allocator, input: *const tensor.Tensor) !tensor.Tensor {
@@ -235,6 +371,36 @@ pub fn globalAveragePool(allocator: std.mem.Allocator, input: *const tensor.Tens
     }
 
     return output;
+}
+
+pub fn reduceMean(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    maybe_axes: ?[]const i64,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+) !tensor.Tensor {
+    return reduceFloat(allocator, input, maybe_axes, keepdims, noop_with_empty_axes, .mean);
+}
+
+pub fn reduceSum(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    maybe_axes: ?[]const i64,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+) !tensor.Tensor {
+    return reduceFloat(allocator, input, maybe_axes, keepdims, noop_with_empty_axes, .sum);
+}
+
+pub fn reduceMax(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    maybe_axes: ?[]const i64,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+) !tensor.Tensor {
+    return reduceFloat(allocator, input, maybe_axes, keepdims, noop_with_empty_axes, .max);
 }
 
 pub fn maxPool(
@@ -508,6 +674,45 @@ pub fn concat(
     };
 }
 
+pub fn split(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    split_tensor: ?*const tensor.Tensor,
+    axis: i64,
+    output_count: usize,
+) !SplitResult {
+    if (output_count == 0) return error.SplitRequiresOutput;
+
+    const normalized_axis = try normalizeAxis(axis, input.shape.len, false);
+    const axis_len = input.shape[normalized_axis];
+
+    const split_sizes = if (split_tensor) |value|
+        try tensorToUsizeList(allocator, value)
+    else blk: {
+        if (axis_len % output_count != 0) return error.SplitUnevenWithoutSizes;
+        const generated = try allocator.alloc(usize, output_count);
+        @memset(generated, axis_len / output_count);
+        break :blk generated;
+    };
+    defer allocator.free(split_sizes);
+
+    if (split_sizes.len != output_count) return error.SplitOutputCountMismatch;
+
+    var total: usize = 0;
+    for (split_sizes) |size| {
+        total = try std.math.add(usize, total, size);
+    }
+    if (total != axis_len) return error.SplitSizesMismatch;
+
+    return switch (input.data) {
+        .float32 => |items| splitTyped(f32, allocator, input.shape, items, normalized_axis, split_sizes, tensor.Tensor.initOwnedFloat32),
+        .int64 => |items| splitTyped(i64, allocator, input.shape, items, normalized_axis, split_sizes, tensor.Tensor.initOwnedInt64),
+        .int32 => |items| splitTyped(i32, allocator, input.shape, items, normalized_axis, split_sizes, tensor.Tensor.initOwnedInt32),
+        .uint8 => |items| splitTyped(u8, allocator, input.shape, items, normalized_axis, split_sizes, tensor.Tensor.initOwnedUint8),
+        .bool => |items| splitTyped(bool, allocator, input.shape, items, normalized_axis, split_sizes, tensor.Tensor.initOwnedBool),
+    };
+}
+
 pub fn squeeze(
     allocator: std.mem.Allocator,
     input: *const tensor.Tensor,
@@ -560,6 +765,45 @@ pub fn cast(
     };
 }
 
+pub fn expand(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    shape_tensor: *const tensor.Tensor,
+) !tensor.Tensor {
+    const output_shape = try tensorToUsizeList(allocator, shape_tensor);
+    errdefer allocator.free(output_shape);
+
+    return switch (input.data) {
+        .float32 => |items| try broadcastToTyped(f32, allocator, input.shape, items, output_shape, tensor.Tensor.initOwnedFloat32),
+        .int64 => |items| try broadcastToTyped(i64, allocator, input.shape, items, output_shape, tensor.Tensor.initOwnedInt64),
+        .int32 => |items| try broadcastToTyped(i32, allocator, input.shape, items, output_shape, tensor.Tensor.initOwnedInt32),
+        .uint8 => |items| try broadcastToTyped(u8, allocator, input.shape, items, output_shape, tensor.Tensor.initOwnedUint8),
+        .bool => |items| try broadcastToTyped(bool, allocator, input.shape, items, output_shape, tensor.Tensor.initOwnedBool),
+    };
+}
+
+pub fn where(
+    allocator: std.mem.Allocator,
+    condition: *const tensor.Tensor,
+    x: *const tensor.Tensor,
+    y: *const tensor.Tensor,
+) !tensor.Tensor {
+    const condition_data = switch (condition.data) {
+        .bool => |items| items,
+        else => return error.WhereConditionMustBeBool,
+    };
+
+    if (x.dtype != y.dtype) return error.WhereDTypeMismatch;
+
+    return switch (x.data) {
+        .float32 => |items| try whereTyped(f32, allocator, condition.shape, condition_data, x.shape, items, y, tensor.Tensor.initOwnedFloat32),
+        .int64 => |items| try whereTyped(i64, allocator, condition.shape, condition_data, x.shape, items, y, tensor.Tensor.initOwnedInt64),
+        .int32 => |items| try whereTyped(i32, allocator, condition.shape, condition_data, x.shape, items, y, tensor.Tensor.initOwnedInt32),
+        .uint8 => |items| try whereTyped(u8, allocator, condition.shape, condition_data, x.shape, items, y, tensor.Tensor.initOwnedUint8),
+        .bool => |items| try whereTyped(bool, allocator, condition.shape, condition_data, x.shape, items, y, tensor.Tensor.initOwnedBool),
+    };
+}
+
 pub fn slice(
     allocator: std.mem.Allocator,
     data: *const tensor.Tensor,
@@ -607,6 +851,71 @@ pub fn slice(
         .uint8 => |items| sliceTyped(u8, allocator, data.shape, items, starts, ends, axes, steps, tensor.Tensor.initOwnedUint8),
         .bool => |items| sliceTyped(bool, allocator, data.shape, items, starts, ends, axes, steps, tensor.Tensor.initOwnedBool),
     };
+}
+
+pub fn pad(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    pads_tensor: *const tensor.Tensor,
+    constant_value: ?*const tensor.Tensor,
+    options: PadOptions,
+) !tensor.Tensor {
+    if (options.mode != .constant) return error.PadModeUnsupported;
+
+    const pads = try tensorToI64List(allocator, pads_tensor);
+    defer allocator.free(pads);
+
+    return switch (input.data) {
+        .float32 => |items| try padTyped(f32, allocator, input.shape, items, pads, try padConstantValue(f32, constant_value), tensor.Tensor.initOwnedFloat32),
+        .int64 => |items| try padTyped(i64, allocator, input.shape, items, pads, try padConstantValue(i64, constant_value), tensor.Tensor.initOwnedInt64),
+        .int32 => |items| try padTyped(i32, allocator, input.shape, items, pads, try padConstantValue(i32, constant_value), tensor.Tensor.initOwnedInt32),
+        .uint8 => |items| try padTyped(u8, allocator, input.shape, items, pads, try padConstantValue(u8, constant_value), tensor.Tensor.initOwnedUint8),
+        .bool => |items| try padTyped(bool, allocator, input.shape, items, pads, try padConstantValue(bool, constant_value), tensor.Tensor.initOwnedBool),
+    };
+}
+
+pub fn resize(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    scales_tensor: ?*const tensor.Tensor,
+    sizes_tensor: ?*const tensor.Tensor,
+    options: ResizeOptions,
+) !tensor.Tensor {
+    if (options.mode != .nearest) return error.ResizeModeUnsupported;
+
+    const input_data = try input.float32Data();
+    if (input.shape.len == 0) return error.ResizeRequiresRankedTensor;
+
+    const output_shape = try resizeOutputShape(allocator, input.shape, scales_tensor, sizes_tensor);
+    errdefer allocator.free(output_shape);
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(f32, output_count);
+    errdefer allocator.free(output_data);
+
+    const input_strides = try strides(allocator, input.shape);
+    defer allocator.free(input_strides);
+
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+
+    const output_indices = try allocator.alloc(usize, output_shape.len);
+    defer allocator.free(output_indices);
+
+    const input_indices = try allocator.alloc(usize, input.shape.len);
+    defer allocator.free(input_indices);
+
+    for (output_data, 0..) |*out, output_linear| {
+        linearToIndices(output_linear, output_shape, output_strides, output_indices);
+
+        for (input_indices, 0..) |*input_index, axis| {
+            input_index.* = nearestResizeSourceIndex(output_indices[axis], input.shape[axis], output_shape[axis]);
+        }
+
+        out.* = input_data[indicesToLinear(input_indices, input_strides)];
+    }
+
+    return tensor.Tensor.initOwnedFloat32(allocator, output_shape, output_data);
 }
 
 fn poolOutputShape(input_shape: []const usize, options: PoolOptions) ![4]usize {
@@ -777,6 +1086,154 @@ fn tensorToI64List(allocator: std.mem.Allocator, value: *const tensor.Tensor) ![
     };
 }
 
+fn tensorToUsizeList(allocator: std.mem.Allocator, value: *const tensor.Tensor) ![]usize {
+    return switch (value.data) {
+        .int64 => |items| blk: {
+            const out = try allocator.alloc(usize, items.len);
+            errdefer allocator.free(out);
+            for (out, items) |*target, item| {
+                if (item <= 0) return error.InvalidTensorDimension;
+                target.* = std.math.cast(usize, item) orelse return error.DimensionTooLarge;
+            }
+            break :blk out;
+        },
+        .int32 => |items| blk: {
+            const out = try allocator.alloc(usize, items.len);
+            errdefer allocator.free(out);
+            for (out, items) |*target, item| {
+                if (item <= 0) return error.InvalidTensorDimension;
+                target.* = std.math.cast(usize, item) orelse return error.DimensionTooLarge;
+            }
+            break :blk out;
+        },
+        else => error.ExpectedIntegerTensor,
+    };
+}
+
+fn tensorToF32List(allocator: std.mem.Allocator, value: *const tensor.Tensor) ![]f32 {
+    const data = try value.float32Data();
+    return allocator.dupe(f32, data);
+}
+
+fn padTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input_shape: []const usize,
+    input_data: []const T,
+    pads: []const i64,
+    constant_value: T,
+    comptime initFn: anytype,
+) !tensor.Tensor {
+    const rank = input_shape.len;
+    if (pads.len != rank * 2) return error.PadRankMismatch;
+
+    const pad_before = try allocator.alloc(usize, rank);
+    defer allocator.free(pad_before);
+
+    const output_shape = try allocator.alloc(usize, rank);
+    errdefer allocator.free(output_shape);
+
+    for (input_shape, 0..) |dim, axis| {
+        const before_raw = pads[axis];
+        const after_raw = pads[axis + rank];
+        if (before_raw < 0 or after_raw < 0) return error.PadNegativeCroppingUnsupported;
+
+        const before = std.math.cast(usize, before_raw) orelse return error.InvalidPadValue;
+        const after = std.math.cast(usize, after_raw) orelse return error.InvalidPadValue;
+
+        pad_before[axis] = before;
+        output_shape[axis] = try std.math.add(usize, try std.math.add(usize, dim, before), after);
+    }
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(T, output_count);
+    errdefer allocator.free(output_data);
+    @memset(output_data, constant_value);
+
+    const input_strides = try strides(allocator, input_shape);
+    defer allocator.free(input_strides);
+
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+
+    const input_indices = try allocator.alloc(usize, rank);
+    defer allocator.free(input_indices);
+
+    const output_indices = try allocator.alloc(usize, rank);
+    defer allocator.free(output_indices);
+
+    for (input_data, 0..) |value, input_linear| {
+        linearToIndices(input_linear, input_shape, input_strides, input_indices);
+
+        for (output_indices, input_indices, pad_before) |*output_index, input_index, before| {
+            output_index.* = input_index + before;
+        }
+
+        output_data[indicesToLinear(output_indices, output_strides)] = value;
+    }
+
+    return initFn(allocator, output_shape, output_data);
+}
+
+fn padConstantValue(comptime T: type, value: ?*const tensor.Tensor) !T {
+    const actual = value orelse return zeroValue(T);
+    if (!isScalar(actual)) return error.ExpectedScalarTensor;
+
+    return switch (actual.data) {
+        .float32 => |items| if (T == f32) items[0] else error.PadConstantDTypeMismatch,
+        .int64 => |items| if (T == i64) items[0] else error.PadConstantDTypeMismatch,
+        .int32 => |items| if (T == i32) items[0] else error.PadConstantDTypeMismatch,
+        .uint8 => |items| if (T == u8) items[0] else error.PadConstantDTypeMismatch,
+        .bool => |items| if (T == bool) items[0] else error.PadConstantDTypeMismatch,
+    };
+}
+
+fn zeroValue(comptime T: type) T {
+    if (T == bool) return false;
+    return 0;
+}
+
+fn resizeOutputShape(
+    allocator: std.mem.Allocator,
+    input_shape: []const usize,
+    scales_tensor: ?*const tensor.Tensor,
+    sizes_tensor: ?*const tensor.Tensor,
+) ![]usize {
+    if (sizes_tensor) |sizes| {
+        const output_shape = try tensorToUsizeList(allocator, sizes);
+        errdefer allocator.free(output_shape);
+
+        if (output_shape.len != input_shape.len) return error.ResizeRankMismatch;
+        return output_shape;
+    }
+
+    const scales = if (scales_tensor) |value|
+        try tensorToF32List(allocator, value)
+    else
+        return error.ResizeRequiresScalesOrSizes;
+    defer allocator.free(scales);
+
+    if (scales.len != input_shape.len) return error.ResizeRankMismatch;
+
+    const output_shape = try allocator.alloc(usize, input_shape.len);
+    errdefer allocator.free(output_shape);
+
+    for (output_shape, input_shape, scales) |*out, dim, scale| {
+        if (scale <= 0) return error.ResizeInvalidScale;
+        const scaled = @floor(@as(f32, @floatFromInt(dim)) * scale);
+        if (scaled < 1) return error.InvalidTensorDimension;
+        out.* = @intFromFloat(scaled);
+    }
+
+    return output_shape;
+}
+
+fn nearestResizeSourceIndex(output_index: usize, input_dim: usize, output_dim: usize) usize {
+    if (output_dim == input_dim) return output_index;
+    const source = (output_index * input_dim) / output_dim;
+    return @min(source, input_dim - 1);
+}
+
 fn sliceTyped(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -928,12 +1385,61 @@ fn concatTyped(
     return initFn(allocator, output_shape, output_data);
 }
 
+fn splitTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input_shape: []const usize,
+    input_data: []const T,
+    axis: usize,
+    split_sizes: []const usize,
+    comptime initFn: anytype,
+) !SplitResult {
+    const outputs = try allocator.alloc(tensor.Tensor, split_sizes.len);
+    errdefer allocator.free(outputs);
+
+    var initialized: usize = 0;
+    errdefer {
+        for (outputs[0..initialized]) |*output| {
+            output.deinit(allocator);
+        }
+    }
+
+    const axis_len = input_shape[axis];
+    const outer = try tensor.elementCount(input_shape[0..axis]);
+    const inner = try tensor.elementCount(input_shape[axis + 1 ..]);
+
+    var axis_start: usize = 0;
+    for (split_sizes, 0..) |split_size, output_index| {
+        const output_shape = try allocator.dupe(usize, input_shape);
+        errdefer allocator.free(output_shape);
+        output_shape[axis] = split_size;
+
+        const output_count = try tensor.elementCount(output_shape);
+        const output_data = try allocator.alloc(T, output_count);
+        errdefer allocator.free(output_data);
+
+        const chunk_len = split_size * inner;
+        for (0..outer) |outer_index| {
+            const input_offset = (outer_index * axis_len + axis_start) * inner;
+            const output_offset = outer_index * chunk_len;
+            @memcpy(output_data[output_offset..][0..chunk_len], input_data[input_offset..][0..chunk_len]);
+        }
+
+        outputs[output_index] = try initFn(allocator, output_shape, output_data);
+        initialized += 1;
+        axis_start += split_size;
+    }
+
+    return .{ .outputs = outputs };
+}
+
 fn typedData(comptime T: type, value: *const tensor.Tensor) ![]const T {
     return switch (value.data) {
         .float32 => |items| if (T == f32) items else error.ConcatUnsupportedDType,
         .int64 => |items| if (T == i64) items else error.ConcatUnsupportedDType,
         .int32 => |items| if (T == i32) items else error.ConcatUnsupportedDType,
-        else => error.ConcatUnsupportedDType,
+        .uint8 => |items| if (T == u8) items else error.ConcatUnsupportedDType,
+        .bool => |items| if (T == bool) items else error.ConcatUnsupportedDType,
     };
 }
 
@@ -941,56 +1447,16 @@ fn elementwiseBinary(
     allocator: std.mem.Allocator,
     a: *const tensor.Tensor,
     b: *const tensor.Tensor,
-    op: *const fn (f32, f32) f32,
+    op: NumericBinaryOp,
 ) !tensor.Tensor {
-    const a_data = try a.float32Data();
-    const b_data = try b.float32Data();
+    if (a.dtype != b.dtype) return error.BinaryDTypeMismatch;
 
-    if (sameShape(a.shape, b.shape)) {
-        var output = try tensor.Tensor.initZeros(allocator, a.shape);
-        errdefer output.deinit(allocator);
-        const output_data = try output.float32DataMut();
-
-        for (output_data, 0..) |*value, index| {
-            value.* = op(a_data[index], b_data[index]);
-        }
-
-        return output;
-    }
-
-    if (isScalar(a)) {
-        var output = try tensor.Tensor.initZeros(allocator, b.shape);
-        errdefer output.deinit(allocator);
-        const output_data = try output.float32DataMut();
-
-        for (output_data, 0..) |*value, index| {
-            value.* = op(a_data[0], b_data[index]);
-        }
-
-        return output;
-    }
-
-    if (isScalar(b)) {
-        var output = try tensor.Tensor.initZeros(allocator, a.shape);
-        errdefer output.deinit(allocator);
-        const output_data = try output.float32DataMut();
-
-        for (output_data, 0..) |*value, index| {
-            value.* = op(a_data[index], b_data[0]);
-        }
-
-        return output;
-    }
-
-    if (canBroadcastLastDim(a.shape, b.shape)) {
-        return binaryLastDimBroadcast(allocator, a, b, op);
-    }
-
-    if (canBroadcastLastDim(b.shape, a.shape)) {
-        return binaryLastDimBroadcastSwapped(allocator, a, b, op);
-    }
-
-    return error.ElementwiseShapeMismatch;
+    return switch (a.data) {
+        .float32 => |items| try binaryBroadcastTyped(f32, allocator, a.shape, items, b, op, tensor.Tensor.initOwnedFloat32),
+        .int64 => |items| try binaryBroadcastTyped(i64, allocator, a.shape, items, b, op, tensor.Tensor.initOwnedInt64),
+        .int32 => |items| try binaryBroadcastTyped(i32, allocator, a.shape, items, b, op, tensor.Tensor.initOwnedInt32),
+        .uint8, .bool => error.BinaryUnsupportedDType,
+    };
 }
 
 pub fn conv(
@@ -1260,6 +1726,86 @@ pub fn softmax(allocator: std.mem.Allocator, input: *const tensor.Tensor, axis: 
     return output;
 }
 
+pub fn topK(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    k_tensor: *const tensor.Tensor,
+    axis: i64,
+    largest: bool,
+    sorted: bool,
+) !TopKResult {
+    _ = sorted;
+
+    const input_data = try input.float32Data();
+    if (input.shape.len == 0) return error.TopKRequiresRankedTensor;
+
+    const k_i64 = try scalarInt64(k_tensor);
+    if (k_i64 <= 0) return error.InvalidTopKValue;
+
+    const k = std.math.cast(usize, k_i64) orelse return error.InvalidTopKValue;
+    const normalized_axis = try normalizeAxis(axis, input.shape.len, false);
+    const axis_len = input.shape[normalized_axis];
+    if (k > axis_len) return error.TopKLargerThanAxis;
+
+    const output_shape = try allocator.dupe(usize, input.shape);
+    errdefer allocator.free(output_shape);
+    output_shape[normalized_axis] = k;
+
+    const output_count = try tensor.elementCount(output_shape);
+
+    const value_data = try allocator.alloc(f32, output_count);
+    errdefer allocator.free(value_data);
+
+    const index_data = try allocator.alloc(i64, output_count);
+    errdefer allocator.free(index_data);
+
+    const outer = try tensor.elementCount(input.shape[0..normalized_axis]);
+    const inner = try tensor.elementCount(input.shape[normalized_axis + 1 ..]);
+
+    const used = try allocator.alloc(bool, axis_len);
+    defer allocator.free(used);
+
+    for (0..outer) |outer_index| {
+        for (0..inner) |inner_index| {
+            @memset(used, false);
+
+            for (0..k) |rank_index| {
+                var best_axis: ?usize = null;
+                var best_value: f32 = 0;
+
+                for (0..axis_len) |axis_index| {
+                    if (used[axis_index]) continue;
+
+                    const input_index = (outer_index * axis_len + axis_index) * inner + inner_index;
+                    const value = input_data[input_index];
+
+                    if (best_axis == null or
+                        topKValueIsBetter(value, axis_index, best_value, best_axis.?, largest))
+                    {
+                        best_axis = axis_index;
+                        best_value = value;
+                    }
+                }
+
+                const selected_axis = best_axis orelse return error.InvalidTopKValue;
+                used[selected_axis] = true;
+
+                const output_index = (outer_index * k + rank_index) * inner + inner_index;
+                value_data[output_index] = best_value;
+                index_data[output_index] = std.math.cast(i64, selected_axis) orelse return error.AxisOutOfBounds;
+            }
+        }
+    }
+
+    const index_shape = try allocator.dupe(usize, output_shape);
+    errdefer allocator.free(index_shape);
+
+    return .{
+        .values = try tensor.Tensor.initOwnedFloat32(allocator, output_shape, value_data),
+        .indices = try tensor.Tensor.initOwnedInt64(allocator, index_shape, index_data),
+    };
+}
+
 fn sameShape(a: []const usize, b: []const usize) bool {
     if (a.len != b.len) return false;
 
@@ -1279,6 +1825,422 @@ fn scalarFloat32(value: *const tensor.Tensor) !f32 {
     if (!isScalar(value)) return error.ExpectedScalarTensor;
     const data = try value.float32Data();
     return data[0];
+}
+
+fn scalarInt64(value: *const tensor.Tensor) !i64 {
+    if (!isScalar(value)) return error.ExpectedScalarTensor;
+
+    return switch (value.data) {
+        .int64 => |items| items[0],
+        .int32 => |items| @intCast(items[0]),
+        else => error.ExpectedIntegerTensor,
+    };
+}
+
+fn reduceFloat(
+    allocator: std.mem.Allocator,
+    input: *const tensor.Tensor,
+    maybe_axes: ?[]const i64,
+    keepdims: bool,
+    noop_with_empty_axes: bool,
+    kind: ReduceKind,
+) !tensor.Tensor {
+    const input_data = try input.float32Data();
+    const rank = input.shape.len;
+
+    var reduce_mask = [_]bool{false} ** 16;
+    if (rank > reduce_mask.len) return error.ReduceRankTooLarge;
+
+    var reduce_count: usize = 0;
+    if (maybe_axes) |axes| {
+        if (axes.len == 0 and noop_with_empty_axes) {
+            return cloneWithShape(allocator, input, input.shape);
+        }
+
+        if (axes.len == 0) {
+            for (0..rank) |axis| {
+                reduce_mask[axis] = true;
+            }
+            reduce_count = rank;
+        } else {
+            for (axes) |axis_raw| {
+                const axis = try normalizeAxis(axis_raw, rank, false);
+                if (reduce_mask[axis]) return error.ReduceDuplicateAxis;
+                reduce_mask[axis] = true;
+                reduce_count += 1;
+            }
+        }
+    } else {
+        if (noop_with_empty_axes) {
+            return cloneWithShape(allocator, input, input.shape);
+        }
+
+        for (0..rank) |axis| {
+            reduce_mask[axis] = true;
+        }
+        reduce_count = rank;
+    }
+
+    const output_rank = if (keepdims) rank else rank - reduce_count;
+    const output_shape = try allocator.alloc(usize, output_rank);
+    errdefer allocator.free(output_shape);
+
+    var output_axis: usize = 0;
+    for (input.shape, 0..) |dim, axis| {
+        if (reduce_mask[axis]) {
+            if (keepdims) {
+                output_shape[output_axis] = 1;
+                output_axis += 1;
+            }
+        } else {
+            output_shape[output_axis] = dim;
+            output_axis += 1;
+        }
+    }
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(f32, output_count);
+    errdefer allocator.free(output_data);
+
+    switch (kind) {
+        .mean, .sum => @memset(output_data, 0),
+        .max => @memset(output_data, -std.math.inf(f32)),
+    }
+
+    var divisor: usize = 1;
+    for (input.shape, 0..) |dim, axis| {
+        if (reduce_mask[axis]) divisor = try std.math.mul(usize, divisor, dim);
+    }
+
+    const input_strides = try strides(allocator, input.shape);
+    defer allocator.free(input_strides);
+
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+
+    const input_indices = try allocator.alloc(usize, rank);
+    defer allocator.free(input_indices);
+
+    const output_indices = try allocator.alloc(usize, output_rank);
+    defer allocator.free(output_indices);
+
+    for (input_data, 0..) |value, input_linear| {
+        linearToIndices(input_linear, input.shape, input_strides, input_indices);
+
+        output_axis = 0;
+        for (input_indices, 0..) |input_index, axis| {
+            if (reduce_mask[axis]) {
+                if (keepdims) {
+                    output_indices[output_axis] = 0;
+                    output_axis += 1;
+                }
+            } else {
+                output_indices[output_axis] = input_index;
+                output_axis += 1;
+            }
+        }
+
+        const output_index = indicesToLinear(output_indices, output_strides);
+        switch (kind) {
+            .mean, .sum => output_data[output_index] += value,
+            .max => output_data[output_index] = @max(output_data[output_index], value),
+        }
+    }
+
+    if (kind == .mean) {
+        const divisor_f32: f32 = @floatFromInt(divisor);
+        for (output_data) |*value| {
+            value.* /= divisor_f32;
+        }
+    }
+
+    return tensor.Tensor.initOwnedFloat32(allocator, output_shape, output_data);
+}
+
+fn filledTensor(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    shape: []usize,
+    count: usize,
+    value: T,
+    comptime initFn: anytype,
+) !tensor.Tensor {
+    const data = try allocator.alloc(T, count);
+    errdefer allocator.free(data);
+    @memset(data, value);
+
+    return initFn(allocator, shape, data);
+}
+
+fn binaryBroadcastTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    a_shape: []const usize,
+    a_data: []const T,
+    b: *const tensor.Tensor,
+    op: NumericBinaryOp,
+    comptime initFn: anytype,
+) !tensor.Tensor {
+    const b_data = try typedData(T, b);
+
+    const output_shape = try broadcastShape2(allocator, a_shape, b.shape);
+    errdefer allocator.free(output_shape);
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(T, output_count);
+    errdefer allocator.free(output_data);
+
+    const a_strides = try strides(allocator, a_shape);
+    defer allocator.free(a_strides);
+    const b_strides = try strides(allocator, b.shape);
+    defer allocator.free(b_strides);
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+    const output_indices = try allocator.alloc(usize, output_shape.len);
+    defer allocator.free(output_indices);
+
+    for (output_data, 0..) |*out, output_linear| {
+        linearToIndices(output_linear, output_shape, output_strides, output_indices);
+        out.* = try applyNumericBinary(
+            T,
+            op,
+            a_data[broadcastLinearIndex(output_indices, a_shape, a_strides)],
+            b_data[broadcastLinearIndex(output_indices, b.shape, b_strides)],
+        );
+    }
+
+    return initFn(allocator, output_shape, output_data);
+}
+
+fn applyNumericBinary(comptime T: type, op: NumericBinaryOp, a: T, b: T) !T {
+    return switch (op) {
+        .add => a + b,
+        .sub => a - b,
+        .mul => a * b,
+        .div => blk: {
+            if (T == f32) break :blk a / b;
+            if (b == 0) return error.DivisionByZero;
+            break :blk @divTrunc(a, b);
+        },
+        .pow => blk: {
+            if (T != f32) return error.BinaryUnsupportedDType;
+            break :blk std.math.pow(f32, a, b);
+        },
+    };
+}
+
+fn elementwiseCompare(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+    comptime op: anytype,
+) !tensor.Tensor {
+    if (a.dtype != b.dtype) return error.CompareDTypeMismatch;
+
+    return switch (a.data) {
+        .float32 => |items| try compareTyped(f32, allocator, a.shape, items, b, op),
+        .int64 => |items| try compareTyped(i64, allocator, a.shape, items, b, op),
+        .int32 => |items| try compareTyped(i32, allocator, a.shape, items, b, op),
+        .uint8 => |items| try compareTyped(u8, allocator, a.shape, items, b, op),
+        .bool => error.CompareUnsupportedDType,
+    };
+}
+
+fn elementwiseEqual(
+    allocator: std.mem.Allocator,
+    a: *const tensor.Tensor,
+    b: *const tensor.Tensor,
+) !tensor.Tensor {
+    if (a.dtype != b.dtype) return error.CompareDTypeMismatch;
+
+    return switch (a.data) {
+        .float32 => |items| try compareTyped(f32, allocator, a.shape, items, b, equalTo),
+        .int64 => |items| try compareTyped(i64, allocator, a.shape, items, b, equalTo),
+        .int32 => |items| try compareTyped(i32, allocator, a.shape, items, b, equalTo),
+        .uint8 => |items| try compareTyped(u8, allocator, a.shape, items, b, equalTo),
+        .bool => |items| try compareTyped(bool, allocator, a.shape, items, b, equalTo),
+    };
+}
+
+fn compareTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    a_shape: []const usize,
+    a_data: []const T,
+    b: *const tensor.Tensor,
+    comptime op: anytype,
+) !tensor.Tensor {
+    const b_data = try typedData(T, b);
+    const output_shape = try broadcastShape2(allocator, a_shape, b.shape);
+    errdefer allocator.free(output_shape);
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(bool, output_count);
+    errdefer allocator.free(output_data);
+
+    const a_strides = try strides(allocator, a_shape);
+    defer allocator.free(a_strides);
+    const b_strides = try strides(allocator, b.shape);
+    defer allocator.free(b_strides);
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+    const output_indices = try allocator.alloc(usize, output_shape.len);
+    defer allocator.free(output_indices);
+
+    for (output_data, 0..) |*out, output_linear| {
+        linearToIndices(output_linear, output_shape, output_strides, output_indices);
+        out.* = op(
+            a_data[broadcastLinearIndex(output_indices, a_shape, a_strides)],
+            b_data[broadcastLinearIndex(output_indices, b.shape, b_strides)],
+        );
+    }
+
+    return tensor.Tensor.initOwnedBool(allocator, output_shape, output_data);
+}
+
+fn whereTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    condition_shape: []const usize,
+    condition_data: []const bool,
+    x_shape: []const usize,
+    x_data: []const T,
+    y: *const tensor.Tensor,
+    comptime initFn: anytype,
+) !tensor.Tensor {
+    const y_data = try typedData(T, y);
+    const output_shape = try broadcastShape3(allocator, condition_shape, x_shape, y.shape);
+    errdefer allocator.free(output_shape);
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(T, output_count);
+    errdefer allocator.free(output_data);
+
+    const condition_strides = try strides(allocator, condition_shape);
+    defer allocator.free(condition_strides);
+    const x_strides = try strides(allocator, x_shape);
+    defer allocator.free(x_strides);
+    const y_strides = try strides(allocator, y.shape);
+    defer allocator.free(y_strides);
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+    const output_indices = try allocator.alloc(usize, output_shape.len);
+    defer allocator.free(output_indices);
+
+    for (output_data, 0..) |*out, output_linear| {
+        linearToIndices(output_linear, output_shape, output_strides, output_indices);
+        const take_x = condition_data[broadcastLinearIndex(output_indices, condition_shape, condition_strides)];
+        out.* = if (take_x)
+            x_data[broadcastLinearIndex(output_indices, x_shape, x_strides)]
+        else
+            y_data[broadcastLinearIndex(output_indices, y.shape, y_strides)];
+    }
+
+    return initFn(allocator, output_shape, output_data);
+}
+
+fn broadcastToTyped(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input_shape: []const usize,
+    input_data: []const T,
+    output_shape: []usize,
+    comptime initFn: anytype,
+) !tensor.Tensor {
+    if (!canBroadcastTo(input_shape, output_shape)) return error.ExpandShapeMismatch;
+
+    const output_count = try tensor.elementCount(output_shape);
+    const output_data = try allocator.alloc(T, output_count);
+    errdefer allocator.free(output_data);
+
+    const input_strides = try strides(allocator, input_shape);
+    defer allocator.free(input_strides);
+    const output_strides = try strides(allocator, output_shape);
+    defer allocator.free(output_strides);
+    const output_indices = try allocator.alloc(usize, output_shape.len);
+    defer allocator.free(output_indices);
+
+    for (output_data, 0..) |*out, output_linear| {
+        linearToIndices(output_linear, output_shape, output_strides, output_indices);
+        out.* = input_data[broadcastLinearIndex(output_indices, input_shape, input_strides)];
+    }
+
+    return initFn(allocator, output_shape, output_data);
+}
+
+fn broadcastShape2(allocator: std.mem.Allocator, a: []const usize, b: []const usize) ![]usize {
+    const shapes = [_][]const usize{ a, b };
+    return broadcastShapes(allocator, &shapes);
+}
+
+fn broadcastShape3(
+    allocator: std.mem.Allocator,
+    a: []const usize,
+    b: []const usize,
+    c: []const usize,
+) ![]usize {
+    const shapes = [_][]const usize{ a, b, c };
+    return broadcastShapes(allocator, &shapes);
+}
+
+fn broadcastShapes(allocator: std.mem.Allocator, input_shapes: []const []const usize) ![]usize {
+    var rank: usize = 0;
+    for (input_shapes) |shape| {
+        rank = @max(rank, shape.len);
+    }
+
+    const output_shape = try allocator.alloc(usize, rank);
+    errdefer allocator.free(output_shape);
+
+    for (0..rank) |axis_from_left| {
+        const axis_from_right = rank - 1 - axis_from_left;
+        var dim: usize = 1;
+
+        for (input_shapes) |shape| {
+            const shape_dim = if (axis_from_right < shape.len)
+                shape[shape.len - 1 - axis_from_right]
+            else
+                1;
+
+            if (shape_dim != 1) {
+                if (dim != 1 and dim != shape_dim) return error.BroadcastShapeMismatch;
+                dim = shape_dim;
+            }
+        }
+
+        output_shape[rank - 1 - axis_from_right] = dim;
+    }
+
+    return output_shape;
+}
+
+fn canBroadcastTo(input_shape: []const usize, output_shape: []const usize) bool {
+    if (input_shape.len > output_shape.len) return false;
+
+    const offset = output_shape.len - input_shape.len;
+    for (input_shape, 0..) |dim, axis| {
+        const output_dim = output_shape[offset + axis];
+        if (dim != 1 and dim != output_dim) return false;
+    }
+
+    return true;
+}
+
+fn broadcastLinearIndex(
+    output_indices: []const usize,
+    input_shape: []const usize,
+    input_strides: []const usize,
+) usize {
+    if (input_shape.len == 0) return 0;
+
+    const offset = output_indices.len - input_shape.len;
+    var linear: usize = 0;
+    for (input_shape, 0..) |dim, axis| {
+        const index = if (dim == 1) 0 else output_indices[offset + axis];
+        linear += index * input_strides[axis];
+    }
+
+    return linear;
 }
 
 fn canBroadcastLastDim(target_shape: []const usize, bias_shape: []const usize) bool {
@@ -1363,6 +2325,30 @@ fn divFloat(a: f32, b: f32) f32 {
     return a / b;
 }
 
+fn powFloat(a: f32, b: f32) f32 {
+    return std.math.pow(f32, a, b);
+}
+
+fn greaterThan(a: anytype, b: @TypeOf(a)) bool {
+    return a > b;
+}
+
+fn lessThan(a: anytype, b: @TypeOf(a)) bool {
+    return a < b;
+}
+
+fn equalTo(a: anytype, b: @TypeOf(a)) bool {
+    return a == b;
+}
+
+fn reciprocalFloat(value: f32) f32 {
+    return 1.0 / value;
+}
+
+fn sqrtFloat(value: f32) f32 {
+    return @sqrt(value);
+}
+
 fn reluFloat(value: f32) f32 {
     return if (value < 0) 0 else value;
 }
@@ -1374,6 +2360,24 @@ fn sigmoidFloat(value: f32) f32 {
 fn tanhFloat(value: f32) f32 {
     const doubled = 2.0 * value;
     return (@exp(doubled) - 1.0) / (@exp(doubled) + 1.0);
+}
+
+fn topKValueIsBetter(
+    value: f32,
+    axis_index: usize,
+    best_value: f32,
+    best_axis: usize,
+    largest: bool,
+) bool {
+    if (largest) {
+        if (value > best_value) return true;
+        if (value < best_value) return false;
+    } else {
+        if (value < best_value) return true;
+        if (value > best_value) return false;
+    }
+
+    return axis_index < best_axis;
 }
 
 fn reshapeTargetShape(
@@ -1762,7 +2766,38 @@ fn tensorFromTensorProto(allocator: std.mem.Allocator, value: *const onnx.Tensor
                 .data = .{ .int32 = data },
             };
         },
-        else => return error.UnsupportedTensorDataType,
+        .uint8 => blk: {
+            const data = try allocator.alloc(u8, count);
+            errdefer allocator.free(data);
+            if (value.raw_data) |raw_data| {
+                if (raw_data.len != count) return error.TensorRawDataLengthMismatch;
+                @memcpy(data, raw_data);
+            } else {
+                try fillUint8FromInt32Data(data, value.int32_data.items);
+            }
+            break :blk .{
+                .dtype = .uint8,
+                .shape = shape,
+                .data = .{ .uint8 = data },
+            };
+        },
+        .bool => blk: {
+            const data = try allocator.alloc(bool, count);
+            errdefer allocator.free(data);
+            if (value.raw_data) |raw_data| {
+                if (raw_data.len != count) return error.TensorRawDataLengthMismatch;
+                for (data, raw_data) |*out, byte| {
+                    out.* = byte != 0;
+                }
+            } else {
+                try fillBoolFromInt32Data(data, value.int32_data.items);
+            }
+            break :blk .{
+                .dtype = .bool,
+                .shape = shape,
+                .data = .{ .bool = data },
+            };
+        },
     };
 }
 
@@ -1833,6 +2868,23 @@ fn fillInt32FromRawData(out: []i32, raw_data: []const u8) !void {
             (@as(u32, raw_data[offset + 2]) << 16) |
             (@as(u32, raw_data[offset + 3]) << 24);
         value.* = @bitCast(bits);
+    }
+}
+
+fn fillUint8FromInt32Data(out: []u8, items: []const i32) !void {
+    if (items.len != out.len) return error.TensorElementCountMismatch;
+
+    for (out, items) |*value, item| {
+        if (item < 0 or item > std.math.maxInt(u8)) return error.InvalidTensorValue;
+        value.* = @intCast(item);
+    }
+}
+
+fn fillBoolFromInt32Data(out: []bool, items: []const i32) !void {
+    if (items.len != out.len) return error.TensorElementCountMismatch;
+
+    for (out, items) |*value, item| {
+        value.* = item != 0;
     }
 }
 
@@ -2043,6 +3095,121 @@ test "elementwise ops support same shape and scalar broadcasting" {
     var div_output = try div(allocator, &a, &scale);
     defer div_output.deinit(allocator);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try div_output.float32Data());
+
+    var lhs = try tensor.Tensor.init(allocator, &.{ 2, 1, 3 }, &.{
+        1, 2, 3,
+        4, 5, 6,
+    });
+    defer lhs.deinit(allocator);
+
+    var rhs = try tensor.Tensor.init(allocator, &.{ 1, 2, 1 }, &.{ 10, 20 });
+    defer rhs.deinit(allocator);
+
+    var broadcast_output = try add(allocator, &lhs, &rhs);
+    defer broadcast_output.deinit(allocator);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2, 3 }, broadcast_output.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        11, 12, 13,
+        21, 22, 23,
+        14, 15, 16,
+        24, 25, 26,
+    }, try broadcast_output.float32Data());
+}
+
+test "elementwise add supports int64 shape arithmetic" {
+    const allocator = std.testing.allocator;
+
+    var shape = try tensor.Tensor.initInt64(allocator, &.{4}, &.{ 1, 3, 320, 320 });
+    defer shape.deinit(allocator);
+
+    var delta = try tensor.Tensor.initInt64(allocator, &.{1}, &.{2});
+    defer delta.deinit(allocator);
+
+    var output = try add(allocator, &shape, &delta);
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqual(tensor.DType.int64, output.dtype);
+    try std.testing.expectEqualSlices(usize, &.{4}, output.shape);
+    switch (output.data) {
+        .int64 => |values| try std.testing.expectEqualSlices(i64, &.{ 3, 5, 322, 322 }, values),
+        else => return error.ExpectedInt64Tensor,
+    }
+}
+
+test "comparison and where ops broadcast tensors" {
+    const allocator = std.testing.allocator;
+
+    var a = try tensor.Tensor.init(allocator, &.{ 2, 2 }, &.{
+        1, 5,
+        7, 2,
+    });
+    defer a.deinit(allocator);
+
+    var threshold = try tensor.Tensor.init(allocator, &.{}, &.{3});
+    defer threshold.deinit(allocator);
+
+    var mask = try greater(allocator, &a, &threshold);
+    defer mask.deinit(allocator);
+
+    switch (mask.data) {
+        .bool => |values| try std.testing.expectEqualSlices(bool, &.{ false, true, true, false }, values),
+        else => return error.ExpectedBoolTensor,
+    }
+
+    var x = try tensor.Tensor.init(allocator, &.{ 2, 2 }, &.{
+        10, 20,
+        30, 40,
+    });
+    defer x.deinit(allocator);
+
+    var y = try tensor.Tensor.init(allocator, &.{}, &.{-1});
+    defer y.deinit(allocator);
+
+    var selected = try where(allocator, &mask, &x, &y);
+    defer selected.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, selected.shape);
+    try std.testing.expectEqualSlices(f32, &.{ -1, 20, 30, -1 }, try selected.float32Data());
+
+    var eq = try equal(allocator, &a, &a);
+    defer eq.deinit(allocator);
+    switch (eq.data) {
+        .bool => |values| try std.testing.expectEqualSlices(bool, &.{ true, true, true, true }, values),
+        else => return error.ExpectedBoolTensor,
+    }
+
+    var lt = try less(allocator, &a, &threshold);
+    defer lt.deinit(allocator);
+    switch (lt.data) {
+        .bool => |values| try std.testing.expectEqualSlices(bool, &.{ true, false, false, true }, values),
+        else => return error.ExpectedBoolTensor,
+    }
+}
+
+test "detection math ops transform and broadcast float tensors" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{4}, &.{ 1, 4, 9, 16 });
+    defer input.deinit(allocator);
+
+    var exponent = try tensor.Tensor.init(allocator, &.{}, &.{0.5});
+    defer exponent.deinit(allocator);
+
+    var pow_output = try pow(allocator, &input, &exponent);
+    defer pow_output.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try pow_output.float32Data());
+
+    var sqrt_output = try sqrt(allocator, &input);
+    defer sqrt_output.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try sqrt_output.float32Data());
+
+    var reciprocal_output = try reciprocal(allocator, &input);
+    defer reciprocal_output.deinit(allocator);
+    const reciprocal_data = try reciprocal_output.float32Data();
+    try std.testing.expectApproxEqAbs(@as(f32, 1), reciprocal_data[0], 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), reciprocal_data[1], 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.11111111), reciprocal_data[2], 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0625), reciprocal_data[3], 0.00001);
 }
 
 test "activation ops transform float tensors" {
@@ -2054,6 +3221,10 @@ test "activation ops transform float tensors" {
     var relu_output = try relu(allocator, &input);
     defer relu_output.deinit(allocator);
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, try relu_output.float32Data());
+
+    var leaky_output = try leakyRelu(allocator, &input, 0.1);
+    defer leaky_output.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, &.{ -0.1, 0, 1 }, try leaky_output.float32Data());
 
     var sigmoid_output = try sigmoid(allocator, &input);
     defer sigmoid_output.deinit(allocator);
@@ -2143,6 +3314,52 @@ test "globalAveragePool reduces spatial dimensions" {
     try std.testing.expectEqualSlices(f32, &.{ 2.5, 25 }, try output.float32Data());
 }
 
+test "reduceMean reduces selected axes and scalar output" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 2, 3 }, &.{
+        1, 2, 3,
+        4, 5, 6,
+    });
+    defer input.deinit(allocator);
+
+    const axes = [_]i64{1};
+    var rows = try reduceMean(allocator, &input, &axes, true, false);
+    defer rows.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 1 }, rows.shape);
+    try std.testing.expectEqualSlices(f32, &.{ 2, 5 }, try rows.float32Data());
+
+    var all = try reduceMean(allocator, &input, null, false, false);
+    defer all.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{}, all.shape);
+    try std.testing.expectEqualSlices(f32, &.{3.5}, try all.float32Data());
+}
+
+test "reduceSum and reduceMax cover detection reductions" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 2, 3 }, &.{
+        1, 2, 3,
+        4, 5, 6,
+    });
+    defer input.deinit(allocator);
+
+    const axes = [_]i64{1};
+    var sums = try reduceSum(allocator, &input, &axes, false, false);
+    defer sums.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{2}, sums.shape);
+    try std.testing.expectEqualSlices(f32, &.{ 6, 15 }, try sums.float32Data());
+
+    var maxes = try reduceMax(allocator, &input, &axes, true, false);
+    defer maxes.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 1 }, maxes.shape);
+    try std.testing.expectEqualSlices(f32, &.{ 3, 6 }, try maxes.float32Data());
+}
+
 test "shapeTensor returns int64 tensor dimensions" {
     const allocator = std.testing.allocator;
 
@@ -2211,6 +3428,36 @@ test "concat joins int64 tensors along axis zero" {
         .int64 => |values| try std.testing.expectEqualSlices(i64, &.{ 1, 3, 224, 224 }, values),
         else => return error.ExpectedInt64Tensor,
     }
+}
+
+test "split produces multiple outputs along an axis" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 2, 4 }, &.{
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+    });
+    defer input.deinit(allocator);
+
+    var sizes = try tensor.Tensor.initInt64(allocator, &.{2}, &.{ 1, 3 });
+    defer sizes.deinit(allocator);
+
+    var result = try split(allocator, &input, &sizes, 1, 2);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.outputs.len);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 1 }, result.outputs[0].shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        1,
+        5,
+    }, try result.outputs[0].float32Data());
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, result.outputs[1].shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        2, 3, 4,
+        6, 7, 8,
+    }, try result.outputs[1].float32Data());
 }
 
 test "maxPool reduces 2d nchw windows" {
@@ -2304,6 +3551,145 @@ test "cast converts existing tensor dtypes" {
 
     try std.testing.expectEqual(tensor.DType.float32, output.dtype);
     try std.testing.expectEqualSlices(f32, &.{ 0, 2, 4 }, try output.float32Data());
+}
+
+test "expand broadcasts tensors to a requested shape" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 1, 3 }, &.{ 1, 2, 3 });
+    defer input.deinit(allocator);
+
+    var shape = try tensor.Tensor.initInt64(allocator, &.{2}, &.{ 2, 3 });
+    defer shape.deinit(allocator);
+
+    var output = try expand(allocator, &input, &shape);
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, output.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        1, 2, 3,
+        1, 2, 3,
+    }, try output.float32Data());
+}
+
+test "constantOfShape creates a default float tensor" {
+    const allocator = std.testing.allocator;
+
+    var shape = try tensor.Tensor.initInt64(allocator, &.{2}, &.{ 2, 3 });
+    defer shape.deinit(allocator);
+
+    var output = try constantOfShape(allocator, &shape, null);
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqual(tensor.DType.float32, output.dtype);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, output.shape);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0 }, try output.float32Data());
+}
+
+test "pad applies constant full-rank padding" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 2, 2 }, &.{
+        1, 2,
+        3, 4,
+    });
+    defer input.deinit(allocator);
+
+    var pads = try tensor.Tensor.initInt64(allocator, &.{4}, &.{ 1, 1, 1, 0 });
+    defer pads.deinit(allocator);
+
+    var constant_value = try tensor.Tensor.init(allocator, &.{}, &.{9});
+    defer constant_value.deinit(allocator);
+
+    var output = try pad(allocator, &input, &pads, &constant_value, .{});
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 4, 3 }, output.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        9, 9, 9,
+        9, 1, 2,
+        9, 3, 4,
+        9, 9, 9,
+    }, try output.float32Data());
+}
+
+test "resize nearest upsamples nchw tensor by sizes" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 1, 1, 2, 2 }, &.{
+        1, 2,
+        3, 4,
+    });
+    defer input.deinit(allocator);
+
+    var sizes = try tensor.Tensor.initInt64(allocator, &.{4}, &.{ 1, 1, 4, 4 });
+    defer sizes.deinit(allocator);
+
+    var output = try resize(allocator, &input, null, &sizes, .{});
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 4, 4 }, output.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        1, 1, 2, 2,
+        1, 1, 2, 2,
+        3, 3, 4, 4,
+        3, 3, 4, 4,
+    }, try output.float32Data());
+}
+
+test "resize nearest upsamples nchw tensor by scales" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 1, 1, 2, 2 }, &.{
+        1, 2,
+        3, 4,
+    });
+    defer input.deinit(allocator);
+
+    var scales = try tensor.Tensor.init(allocator, &.{4}, &.{ 1, 1, 2, 2 });
+    defer scales.deinit(allocator);
+
+    var output = try resize(allocator, &input, &scales, null, .{});
+    defer output.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 4, 4 }, output.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        1, 1, 2, 2,
+        1, 1, 2, 2,
+        3, 3, 4, 4,
+        3, 3, 4, 4,
+    }, try output.float32Data());
+}
+
+test "topK returns values and int64 indices" {
+    const allocator = std.testing.allocator;
+
+    var input = try tensor.Tensor.init(allocator, &.{ 2, 4 }, &.{
+        1, 5, 2, 3,
+        4, 0, 9, 8,
+    });
+    defer input.deinit(allocator);
+
+    var k = try tensor.Tensor.initInt64(allocator, &.{}, &.{2});
+    defer k.deinit(allocator);
+
+    var result = try topK(allocator, &input, &k, 1, true, true);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, result.values.shape);
+    try std.testing.expectEqualSlices(f32, &.{
+        5, 3,
+        9, 8,
+    }, try result.values.float32Data());
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, result.indices.shape);
+    switch (result.indices.data) {
+        .int64 => |values| try std.testing.expectEqualSlices(i64, &.{
+            1, 3,
+            2, 3,
+        }, values),
+        else => return error.ExpectedInt64Tensor,
+    }
 }
 
 test "slice extracts positive-step tensor ranges" {

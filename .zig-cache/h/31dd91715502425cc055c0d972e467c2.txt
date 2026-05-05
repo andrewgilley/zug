@@ -819,8 +819,8 @@
 8276 212795082393272387 1777947929494576300 dcde59601df074f6910121f0495ba77b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\tensor.zig
 8715 181832834955114433 1777933051525527000 814c559ea28a04611291f7e313de1d82 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasi_nn.zig
 79580 30117822508434998 1777842116607567300 805b5fe2267a9de17d1319b61b52426b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\proto\onnx.pb.zig
-31697 16044073673685197 1777948010730681600 14cd474d81bbd5948fac9e157de91baf 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\executor.zig
+41362 16044073673685197 1777990292845782200 7ff9804d4d3957f06c2f41c3f9884f3d 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\executor.zig
 46076 11821949022081193 1777830627783192700 be26b79f5922619d7e5a97b4d2c1469f 0 C:\Users\andre\Desktop\Dev\code\zig\zug\zig-pkg\protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1\src\protobuf.zig
-79616 33214047252553102 1777950153257309000 4d23c4dbc4354cdc21615af1e22bba05 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\ops.zig
+127615 15762598696454493 1777991044804053400 bf097cd79e4042767ce27364a38b47fc 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\ops.zig
 29273 37154696926040145 1777830627782078600 5e7c7b722ce5c54c608d5afa57a7b817 0 C:\Users\andre\Desktop\Dev\code\zig\zug\zig-pkg\protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1\src\json.zig
 44452 11258999068659993 1777830627784189600 5484c6b821be1c380276522a14e5f3dc 0 C:\Users\andre\Desktop\Dev\code\zig\zug\zig-pkg\protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1\src\wire.zig

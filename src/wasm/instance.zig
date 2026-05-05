@@ -344,6 +344,7 @@ fn constValueMatchesType(value: module.ConstValue, value_type: module.ValueType)
         .i64 => std.meta.activeTag(value) == .i64,
         .f32 => std.meta.activeTag(value) == .f32,
         .f64 => std.meta.activeTag(value) == .f64,
+        .v128 => std.meta.activeTag(value) == .v128,
     };
 }
 

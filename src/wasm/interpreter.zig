@@ -10,6 +10,7 @@ pub const Value = union(enum) {
     i64: u64,
     f32: f32,
     f64: f64,
+    v128: [16]u8,
 };
 
 const Flow = union(enum) {
@@ -945,6 +946,7 @@ pub const Interpreter = struct {
                     try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
                 },
                 0xfc => try self.executePrefixedInstruction(reader, stack),
+                0xfd => try self.executeSimdInstruction(reader, stack),
                 else => return error.UnsupportedWasmOpcode,
             }
         }
@@ -994,6 +996,67 @@ pub const Interpreter = struct {
             },
             0x0a => try self.executeMemoryCopy(reader, stack),
             0x0b => try self.executeMemoryFill(reader, stack),
+            else => return error.UnsupportedWasmOpcode,
+        }
+    }
+
+    fn executeSimdInstruction(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const subopcode = try reader.readVarU32();
+
+        switch (subopcode) {
+            0x00 => {
+                _ = try reader.readVarU32();
+                const offset = try reader.readVarU32();
+                const address = try valueAsI32(try popValue(stack));
+                const effective_address = try std.math.add(u32, address, offset);
+                const bytes = try self.instance.memory.read(effective_address, 16);
+                var value: [16]u8 = undefined;
+                @memcpy(value[0..], bytes);
+                try stack.append(self.instance.allocator, .{ .v128 = value });
+            },
+            0x0b => {
+                _ = try reader.readVarU32();
+                const offset = try reader.readVarU32();
+                const value = try valueAsV128(try popValue(stack));
+                const address = try valueAsI32(try popValue(stack));
+                const effective_address = try std.math.add(u32, address, offset);
+                try self.instance.memory.write(effective_address, value[0..]);
+            },
+            0x0c => {
+                var value: [16]u8 = undefined;
+                @memcpy(value[0..], try reader.readBytes(16));
+                try stack.append(self.instance.allocator, .{ .v128 = value });
+            },
+            0x11 => {
+                const scalar = try valueAsI32(try popValue(stack));
+                var value: [16]u8 = undefined;
+                for (0..4) |lane| {
+                    writeU32Little(value[lane * 4 .. lane * 4 + 4], scalar);
+                }
+                try stack.append(self.instance.allocator, .{ .v128 = value });
+            },
+            0x1b => {
+                const lane = try reader.readByte();
+                if (lane >= 4) return error.InvalidSimdLane;
+                const value = try valueAsV128(try popValue(stack));
+                const start = @as(usize, lane) * 4;
+                try stack.append(self.instance.allocator, .{ .i32 = readU32Little(value[start .. start + 4]) });
+            },
+            0xae => {
+                const rhs = try valueAsV128(try popValue(stack));
+                const lhs = try valueAsV128(try popValue(stack));
+                var result: [16]u8 = undefined;
+                for (0..4) |lane| {
+                    const start = lane * 4;
+                    const sum = readU32Little(lhs[start .. start + 4]) +% readU32Little(rhs[start .. start + 4]);
+                    writeU32Little(result[start .. start + 4], sum);
+                }
+                try stack.append(self.instance.allocator, .{ .v128 = result });
+            },
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -1211,7 +1274,7 @@ pub const Interpreter = struct {
         if (args.len > args_buffer.len) return error.UnsupportedImportArity;
 
         for (args, 0..) |arg, index| {
-            args_buffer[index] = argFromValue(arg);
+            args_buffer[index] = try argFromValue(arg);
         }
 
         return self.callImport(function, args_buffer[0..args.len]);
@@ -1235,6 +1298,7 @@ fn readLocalDeclarations(
                 0x7e => try locals.append(allocator, .{ .i64 = 0 }),
                 0x7d => try locals.append(allocator, .{ .f32 = 0 }),
                 0x7c => try locals.append(allocator, .{ .f64 = 0 }),
+                0x7b => try locals.append(allocator, .{ .v128 = [_]u8{0} ** 16 }),
                 else => return error.UnsupportedLocalType,
             }
         }
@@ -1280,6 +1344,7 @@ fn valueMatchesType(value: Value, value_type: module.ValueType) bool {
         .i64 => std.meta.activeTag(value) == .i64,
         .f32 => std.meta.activeTag(value) == .f32,
         .f64 => std.meta.activeTag(value) == .f64,
+        .v128 => std.meta.activeTag(value) == .v128,
     };
 }
 
@@ -1289,6 +1354,7 @@ fn valueFromConst(value: module.ConstValue) Value {
         .i64 => |actual| .{ .i64 = actual },
         .f32 => |actual| .{ .f32 = actual },
         .f64 => |actual| .{ .f64 = actual },
+        .v128 => |actual| .{ .v128 = actual },
     };
 }
 
@@ -1304,15 +1370,20 @@ fn constValueFromValue(value: Value, value_type: module.ValueType) !module.Const
             .f64 => |actual| .{ .f64 = actual },
             else => error.ExpectedF64Value,
         },
+        .v128 => switch (value) {
+            .v128 => |actual| .{ .v128 = actual },
+            else => error.ExpectedV128Value,
+        },
     };
 }
 
-fn argFromValue(value: Value) imports.Arg {
+fn argFromValue(value: Value) !imports.Arg {
     return switch (value) {
         .i32 => |actual| .{ .i32 = actual },
         .i64 => |actual| .{ .i64 = actual },
         .f32 => |actual| .{ .f32 = actual },
         .f64 => |actual| .{ .f64 = actual },
+        .v128 => error.UnsupportedImportParamType,
     };
 }
 
@@ -1351,7 +1422,7 @@ fn readSelectTypeVector(reader: *binary.Reader) !void {
     if (count != 1) return error.UnsupportedSelectTypeVector;
 
     switch (try reader.readByte()) {
-        0x7f, 0x7e, 0x7d, 0x7c => {},
+        0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedValueType,
     }
 }
@@ -1424,7 +1495,7 @@ fn readBlockType(reader: *binary.Reader) !void {
     const block_type = try reader.readByte();
 
     switch (block_type) {
-        0x40, 0x7f, 0x7e, 0x7d, 0x7c => {},
+        0x40, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedBlockType,
     }
 }
@@ -1458,6 +1529,7 @@ fn skipInstructionImmediate(reader: *binary.Reader, opcode: u8) !void {
         0x43 => _ = try reader.readBytes(4),
         0x44 => _ = try reader.readBytes(8),
         0xfc => try skipPrefixedInstructionImmediate(reader),
+        0xfd => try skipSimdInstructionImmediate(reader),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1476,6 +1548,25 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
             const memory_index = try reader.readByte();
             if (memory_index != 0) return error.UnsupportedMemoryIndex;
         },
+        else => return error.UnsupportedWasmOpcode,
+    }
+}
+
+fn skipSimdInstructionImmediate(reader: *binary.Reader) !void {
+    const subopcode = try reader.readVarU32();
+
+    switch (subopcode) {
+        0x00, 0x0b => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+        },
+        0x0c => _ = try reader.readBytes(16),
+        0x11 => {},
+        0x1b => {
+            const lane = try reader.readByte();
+            if (lane >= 4) return error.InvalidSimdLane;
+        },
+        0xae => {},
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1528,6 +1619,13 @@ fn valueAsF64(value: Value) !f64 {
     return switch (value) {
         .f64 => |actual| actual,
         else => error.ExpectedF64Value,
+    };
+}
+
+fn valueAsV128(value: Value) ![16]u8 {
+    return switch (value) {
+        .v128 => |actual| actual,
+        else => error.ExpectedV128Value,
     };
 }
 
@@ -2216,6 +2314,25 @@ test "interpreter executes prefixed numeric and memory ops" {
     try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(11, 1))[0]);
 }
 
+test "interpreter executes initial simd i32x4 ops" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.simd_i32x4_memory_ops);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 11), try valueAsI32(result));
+    try std.testing.expectEqual(@as(u32, 8), try wasm_instance.memory.readU32(0));
+    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory.readU32(4));
+    try std.testing.expectEqual(@as(u32, 10), try wasm_instance.memory.readU32(8));
+    try std.testing.expectEqual(@as(u32, 11), try wasm_instance.memory.readU32(12));
+}
+
 test "interpreter executes extended i64 memory ops" {
     const allocator = std.testing.allocator;
 
@@ -2475,6 +2592,13 @@ fn readU16Little(bytes: []const u8) u16 {
 fn writeU16Little(bytes: []u8, value: u16) void {
     bytes[0] = std.math.cast(u8, value & 0xff) orelse unreachable;
     bytes[1] = std.math.cast(u8, (value >> 8) & 0xff) orelse unreachable;
+}
+
+fn writeU32Little(bytes: []u8, value: u32) void {
+    bytes[0] = std.math.cast(u8, value & 0xff) orelse unreachable;
+    bytes[1] = std.math.cast(u8, (value >> 8) & 0xff) orelse unreachable;
+    bytes[2] = std.math.cast(u8, (value >> 16) & 0xff) orelse unreachable;
+    bytes[3] = std.math.cast(u8, (value >> 24) & 0xff) orelse unreachable;
 }
 
 fn writeU64Little(bytes: []u8, value: u64) void {

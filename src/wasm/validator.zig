@@ -435,6 +435,7 @@ const ExpressionValidator = struct {
             0xc0, 0xc1 => try self.validateUnary(.i32, .i32),
             0xc2...0xc4 => try self.validateUnary(.i64, .i64),
             0xfc => try self.validatePrefixedInstruction(reader),
+            0xfd => try self.validateSimdInstruction(reader),
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -449,6 +450,27 @@ const ExpressionValidator = struct {
             0x06, 0x07 => try self.validateUnary(.f64, .i64),
             0x0a => try self.validateMemoryCopy(reader),
             0x0b => try self.validateMemoryFill(reader),
+            else => return error.UnsupportedWasmOpcode,
+        }
+    }
+
+    fn validateSimdInstruction(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const subopcode = try reader.readVarU32();
+
+        switch (subopcode) {
+            0x00 => try self.validateLoad(reader, .v128),
+            0x0b => try self.validateStore(reader, .v128),
+            0x0c => {
+                _ = try reader.readBytes(16);
+                try self.push(.v128);
+            },
+            0x11 => try self.validateUnary(.i32, .v128),
+            0x1b => {
+                const lane = try reader.readByte();
+                if (lane >= 4) return error.InvalidSimdLane;
+                try self.validateUnary(.v128, .i32);
+            },
+            0xae => try self.validateBinary(.v128, .v128),
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -801,6 +823,7 @@ fn readBlockType(reader: *binary.Reader) !BlockType {
         0x7e => .{ .result = .i64 },
         0x7d => .{ .result = .f32 },
         0x7c => .{ .result = .f64 },
+        0x7b => .{ .result = .v128 },
         else => error.UnsupportedBlockType,
     };
 }
@@ -818,6 +841,7 @@ fn valueTypeFromByte(value: u8) !module.ValueType {
         0x7e => .i64,
         0x7d => .f32,
         0x7c => .f64,
+        0x7b => .v128,
         else => error.UnsupportedValueType,
     };
 }
@@ -927,6 +951,7 @@ fn skipInstructionImmediate(reader: *binary.Reader, opcode: u8) !void {
         0x43 => _ = try reader.readBytes(4),
         0x44 => _ = try reader.readBytes(8),
         0xfc => try skipPrefixedInstructionImmediate(reader),
+        0xfd => try skipSimdInstructionImmediate(reader),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -945,6 +970,25 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
             const memory_index = try reader.readByte();
             if (memory_index != 0) return error.UnsupportedMemoryIndex;
         },
+        else => return error.UnsupportedWasmOpcode,
+    }
+}
+
+fn skipSimdInstructionImmediate(reader: *binary.Reader) !void {
+    const subopcode = try reader.readVarU32();
+
+    switch (subopcode) {
+        0x00, 0x0b => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+        },
+        0x0c => _ = try reader.readBytes(16),
+        0x11 => {},
+        0x1b => {
+            const lane = try reader.readByte();
+            if (lane >= 4) return error.InvalidSimdLane;
+        },
+        0xae => {},
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -968,6 +1012,7 @@ test "validator accepts supported runtime fixtures" {
         fixtures.numeric_i64_and_float_ops,
         fixtures.float_conversion_ops,
         fixtures.prefixed_numeric_and_memory_ops,
+        fixtures.simd_i32x4_memory_ops,
         fixtures.extended_i64_memory_ops,
         fixtures.globals_and_start,
         fixtures.memory_size_and_grow,
