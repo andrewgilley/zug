@@ -1099,6 +1099,15 @@ fn skipSupportedOpcodeImmediate(
             has_memory,
             report,
         ),
+        0xd0 => {
+            const heap_type = try reader.readByte();
+            if (heap_type != 0x70) return false;
+            return true;
+        },
+        0xd2 => {
+            _ = try reader.readVarU32();
+            return true;
+        },
         else => return false,
     }
 }
@@ -1115,6 +1124,18 @@ fn skipSupportedPrefixedOpcodeImmediate(
 
     switch (subopcode) {
         0x00...0x07 => return true,
+        0x08 => {
+            report.memory_instruction_count += 1;
+            if (!has_memory) report.missing_memory_count += 1;
+            _ = try reader.readVarU32();
+            const memory_index = try reader.readByte();
+            if (memory_index != 0) report.unsupported_memory_index_count += 1;
+            return true;
+        },
+        0x09 => {
+            _ = try reader.readVarU32();
+            return true;
+        },
         0x0a => {
             report.memory_instruction_count += 1;
             if (!has_memory) report.missing_memory_count += 1;
@@ -1130,6 +1151,24 @@ fn skipSupportedPrefixedOpcodeImmediate(
             if (!has_memory) report.missing_memory_count += 1;
             const memory_index = try reader.readByte();
             if (memory_index != 0) report.unsupported_memory_index_count += 1;
+            return true;
+        },
+        0x0c => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+            return true;
+        },
+        0x0d => {
+            _ = try reader.readVarU32();
+            return true;
+        },
+        0x0e => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+            return true;
+        },
+        0x0f, 0x10, 0x11 => {
+            _ = try reader.readVarU32();
             return true;
         },
         else => {
@@ -1198,7 +1237,7 @@ fn skipLocalDeclarations(reader: *binary.Reader) !void {
 fn skipBlockType(reader: *binary.Reader) !void {
     const block_type = try reader.readByte();
     switch (block_type) {
-        0x40, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
+        0x40, 0x70, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedBlockType,
     }
 }
@@ -1212,7 +1251,7 @@ fn skipSelectTypeVector(reader: *binary.Reader) !void {
 fn skipValueType(reader: *binary.Reader) !void {
     const value_type = try reader.readByte();
     switch (value_type) {
-        0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
+        0x70, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedValueType,
     }
 }
@@ -1284,6 +1323,17 @@ test "compatibility accepts supported simd wasm fixture" {
 
     try std.testing.expect(report.supported());
     try std.testing.expectEqual(@as(usize, 2), report.opcodes.memory_instruction_count);
+    try std.testing.expectEqual(@as(usize, 0), report.opcodes.unsupported.items.len);
+}
+
+test "compatibility accepts supported table and reference fixture" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixtures.zig");
+
+    var report = try analyzeBytes(allocator, fixtures.table_copy_grow_size_fill, .{}, .{ .export_name = "run" });
+    defer report.deinit(allocator);
+
+    try std.testing.expect(report.supported());
     try std.testing.expectEqual(@as(usize, 0), report.opcodes.unsupported.items.len);
 }
 

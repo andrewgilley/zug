@@ -2,80 +2,106 @@
 
 ## Core Thesis
 
-WebAssembly is positioned to compete with parts of the container infrastructure ecosystem because it offers a smaller, more portable, more sandboxable execution unit for software that needs to run across heterogeneous environments. Containers will remain important for full operating-system packaging and conventional cloud deployment, but many emerging workloads do not need a full container boundary. They need fast startup, strong isolation, predictable resource control, cross-platform portability, and a clean host capability model.
+WebAssembly can compete with parts of the container infrastructure ecosystem because it provides a smaller, more portable, more sandboxable execution unit for workloads that do not need a full operating-system packaging boundary.
 
-Those requirements are especially important for machine learning and edge computing. Edge inference workloads need to move between CPUs, accelerators, devices, gateways, and cloud-adjacent nodes without dragging along heavyweight deployment assumptions. A WebAssembly-centered runtime can make model execution more modular, safer, and easier to distribute across constrained infrastructure.
+Containers remain important for conventional cloud services and dependency-heavy applications. The stronger argument is narrower: many edge workloads need fast startup, strong isolation, explicit host capabilities, predictable resource limits, and cross-platform deployment more than they need a full container image.
 
-The commercial opportunity is to apply WebAssembly's runtime properties to ML systems: model loading, tensor handling, graph execution, device-aware scheduling, WASI-NN integration, and secure host capabilities can be combined into a runtime layer for advanced distributed inference.
+ML inference at the edge is a strong fit for this shift. A model-backed edge workload often contains preprocessing, model invocation, postprocessing, routing, policy, telemetry, and device-specific capability access. WebAssembly can carry the portable application logic while the host runtime controls access to models, tensors, accelerators, storage, networking, and observability.
 
-## Why WebAssembly Can Compete With Containers
+`zug` applies this thesis directly: it is becoming a WASM runtime and systems layer that understands ML models as first-class runtime objects.
 
-Containers package processes with filesystem, network, and operating-system assumptions. WebAssembly packages computation with a compact instruction format, a sandboxed memory model, and explicit imports from the host. This difference matters when the deployment target is not a conventional server.
+## What The Project Has Already Proven
 
-WebAssembly has several technical advantages:
+The project now has enough implementation to make the thesis concrete:
 
-- Smaller deployment artifacts for narrow compute tasks.
-- Faster cold starts than typical containerized processes.
-- A sandbox designed around explicit host capabilities.
-- Portability across operating systems and CPU architectures.
-- A runtime model that can fit embedded, edge, browser, server, and plugin environments.
-- A cleaner path for multi-tenant execution in constrained environments.
-- A standards-based ABI direction through WASI and component-model work.
+- ONNX models can be decoded, inspected, and executed locally.
+- Tensor values are represented explicitly across several data types.
+- A growing ONNX operator set can run real small vision models.
+- WASM modules can be parsed, validated, instantiated, and interpreted across a meaningful core subset.
+- WASI Preview 1 imports support basic guest interaction such as args, environment, time, random, stdout/stderr writes, and process exit.
+- A WASI-NN shaped ABI can drive host-managed graph execution.
+- Guest WASM fixtures can call into the host ML surface.
+- Workload manifests can describe a bundle of guest code, model assets, target requirements, and network needs.
+- `zug check` can report compatibility for ONNX models, WASM modules, and workload directories.
+- `zug agent` can expose node capabilities over real TCP/HTTP.
 
-These strengths do not eliminate containers. Instead, they create a competing layer for workloads where containers are too heavy, too slow to start, too tied to host assumptions, or too broad as a security boundary.
+This is not yet a production runtime, but it is no longer only a concept. The core architecture is now visible in code.
 
-## Why This Matters For ML And Edge Computing
+## Why WebAssembly Matters Here
 
-Modern ML deployment is moving beyond a single cloud-hosted inference endpoint. Models increasingly need to run near sensors, users, devices, factories, vehicles, private data stores, and low-latency operational systems. That creates pressure for runtimes that can handle heterogeneous hardware, intermittent connectivity, limited memory, and strict security constraints.
+WebAssembly changes the deployment unit. Instead of packaging a process with broad filesystem and operating-system assumptions, a WASM module packages computation and declares host imports.
 
-WebAssembly can support this shift by acting as a portable execution envelope for edge inference components. A guest module can contain preprocessing, routing logic, model invocation calls, output handling, and application-specific policy. The host runtime can provide controlled access to ML capabilities such as ONNX execution, tensor memory, accelerators, storage, networking, and observability.
+For edge ML, that distinction is useful:
 
-This separation is valuable:
+- The guest can remain portable across devices.
+- The host can enforce capability boundaries.
+- Model execution can be provided through a stable ABI instead of embedded native dependencies.
+- Runtime compatibility can be checked before execution.
+- Updates can ship as smaller artifacts.
+- Multi-tenant execution on gateways becomes more plausible.
+- Placement can account for model, dtype, memory, and network constraints.
 
-- Guest modules stay portable and isolated.
-- Host capabilities remain controlled and device-specific.
-- ML models can be loaded and executed through stable ABI surfaces.
-- Edge applications can be updated without replacing the whole device runtime.
-- Distributed systems can move inference logic across nodes more easily.
+This is the basis for a runtime that sits between generic WASM execution and production ML deployment.
 
-## Runtime Direction
+## Why Containers Are Not The Whole Answer
 
-The runtime should evolve toward a capability-oriented edge inference environment. In practical terms, that means:
+Containers are excellent for many server workloads, but they are often too broad for constrained edge inference:
 
-- Parse and execute WebAssembly modules with enough instruction coverage for compiled guests.
-- Provide a WASI-compatible base for ordinary guest behavior such as logging, memory use, and process-style exits.
-- Provide a WASI-NN-inspired ML surface for loading graphs, setting tensor inputs, computing outputs, and retrieving result buffers.
-- Support ONNX as an initial graph/model format while keeping the runtime open to additional model encodings.
-- Keep tensor representation explicit so model execution can become type-aware, memory-aware, and accelerator-aware.
-- Build toward distributed execution where placement, model availability, and hardware capabilities influence where computation runs.
+- They assume a heavier host operating-system boundary.
+- They tend to hide application requirements inside images.
+- They do not naturally expose model/operator compatibility as a scheduling primitive.
+- They can be awkward for heterogeneous devices with different accelerators, memory limits, and network policies.
+- Their security boundary is broader than a small, capability-oriented guest module.
 
-## Novel Capabilities
+The opportunity is not to replace containers everywhere. The opportunity is to build a better deployment and execution unit for portable edge inference.
 
-A WebAssembly-first edge ML runtime can enable capabilities that are harder to deliver cleanly with containers alone:
+## The Zug Interpretation
 
-- Fine-grained, sandboxed ML plugins.
-- Device-local inference modules that can be updated independently.
-- Secure multi-tenant inference on shared edge gateways.
-- Portable model adapters that run across cloud, edge, and embedded contexts.
-- Host-controlled access to accelerators without exposing broad system privileges.
-- Distributed inference graphs where preprocessing, model execution, and postprocessing can move across nodes.
-- Policy-driven execution based on latency, power, privacy, or hardware availability.
+The strongest form of `zug` is a model-aware WebAssembly runtime:
+
+- WASM carries application behavior.
+- WASI carries basic system interaction.
+- WASI-NN carries model inference calls.
+- ONNX is the first model backend.
+- Tensors and graph execution are explicit runtime concepts.
+- Capability checks explain whether a model-backed guest can run on a target.
+- Workload manifests become the deployment unit.
+- Agents expose target capabilities and eventually accept checked workloads.
+
+This positions the project as an edge inference environment, not just a WASM interpreter and not just an ONNX executor.
 
 ## Commercial Implication
 
-If WebAssembly becomes a standard execution layer for portable edge compute, then ML infrastructure will need runtimes that understand both Wasm and model execution. A project in this space can create commercial value by becoming the bridge between general-purpose Wasm execution and production ML inference needs.
+The commercial opportunity is a trusted runtime layer for portable edge inference.
 
-The valuable product is not just a Wasm interpreter or an ONNX parser. The valuable product is a trusted edge inference environment: secure module loading, model execution, observability, hardware targeting, deployment management, and a developer workflow that makes distributed ML applications easier to build and operate.
+Useful product forms include:
 
-## Project Implication
+- A compatibility CLI for model and workload readiness.
+- An embedded runtime SDK for device vendors.
+- A lightweight edge agent for capability reporting and controlled execution.
+- A workload package format for WASM plus model assets.
+- A model-aware scheduler for heterogeneous fleets.
+- Diagnostics for unsupported ops, dtypes, memory limits, WASI imports, and network requirements.
+- A secure host capability layer for accelerators and device resources.
 
-For this project, the thesis points toward a clear development strategy:
+The first valuable product can be the tool that tells ML engineers whether a model-backed WASM workload can run on a target edge device, why it cannot, and what has to change.
 
-- Make the Wasm runtime capable enough to run realistic guest modules.
-- Expand WASI and WASI-NN compatibility in deliberate layers.
-- Improve ONNX operator and datatype coverage so real models can execute.
-- Treat tensor memory and graph execution as first-class runtime concepts.
-- Add tests that prove complete guest flows: load model, set input, compute, retrieve output, and report status.
-- Build toward distributed edge scenarios where Wasm modules become portable inference workloads.
+## Technical Implication
 
-The near-term goal is not to replace containers everywhere. The near-term goal is to prove that a smaller, safer, faster, and more portable runtime can handle useful ML workloads at the edge. From there, the project can grow into a platform for distributed inference systems with capabilities that container-first infrastructure does not naturally provide.
+The project should keep developing along these lines:
+
+- Harden `zug check` into a serious compatibility product.
+- Add `zug run workload/` as the central local execution workflow.
+- Keep WASI-NN as the stable ML ABI shape.
+- Expand WASI support only where it helps real guests.
+- Increase WASM instruction and validation coverage through spec tests.
+- Improve ONNX op, dtype, shape, and attribute coverage.
+- Optimize execution through planning, buffer reuse, and specialized kernels.
+- Treat networking as explicit host authority, not ambient guest access.
+- Grow the agent from capability reporting to checked workload execution.
+
+## Strategic Claim
+
+If edge AI continues moving toward heterogeneous local execution, then runtime infrastructure needs to reason about more than processes and containers. It needs to reason about models, tensors, accelerators, memory limits, WASM imports, network policy, privacy, and placement.
+
+`zug` should become the layer that connects those concerns into a portable execution environment.

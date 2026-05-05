@@ -6,6 +6,7 @@ const executor = @import("executor.zig");
 const capabilities = @import("capabilities.zig");
 const benchmark = @import("benchmark.zig");
 const check = @import("check.zig");
+const agent = @import("agent.zig");
 const scope = @import("scope.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
@@ -27,6 +28,7 @@ const CliMode = enum {
     scope,
     bench,
     wasm,
+    agent,
 };
 
 const BenchFormat = enum {
@@ -58,6 +60,10 @@ const CliArgs = struct {
     check_kind: check.ArtifactKind = .auto,
     check_memory_bytes: ?usize = null,
     check_output_format: check.OutputFormat = .text,
+    agent_node_id: ?[]const u8 = null,
+    agent_profile_name: ?[]const u8 = null,
+    agent_listen: ?[]const u8 = null,
+    agent_once: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         allocator.free(self.model_path);
@@ -69,6 +75,15 @@ const CliArgs = struct {
         }
         if (self.wasm_manifest_path) |path| {
             allocator.free(path);
+        }
+        if (self.agent_node_id) |node_id| {
+            allocator.free(node_id);
+        }
+        if (self.agent_profile_name) |profile_name| {
+            allocator.free(profile_name);
+        }
+        if (self.agent_listen) |listen| {
+            allocator.free(listen);
         }
 
         for (self.inputs.items) |input| {
@@ -118,6 +133,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (cli.mode == .scope) {
         scope.print();
+        return;
+    }
+
+    if (cli.mode == .agent) {
+        try agent.serve(allocator, .{
+            .node_id = cli.agent_node_id orelse "local-node",
+            .profile_name = cli.agent_profile_name orelse "vision-f32-basic",
+            .listen = cli.agent_listen orelse "127.0.0.1:7070",
+            .once = cli.agent_once,
+        });
         return;
     }
 
@@ -297,6 +322,65 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
         errdefer cli.deinit(allocator);
 
         if (args.next() != null) {
+            printUsage();
+            return error.UnknownArgument;
+        }
+
+        return cli;
+    }
+
+    if (std.mem.eql(u8, first_arg, "agent")) {
+        var cli = CliArgs{
+            .mode = .agent,
+            .model_path = try allocator.dupe(u8, ""),
+        };
+        errdefer cli.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--node") or std.mem.eql(u8, arg, "--node-id")) {
+                const node_id = args.next() orelse {
+                    printUsage();
+                    return error.MissingAgentNodeId;
+                };
+
+                if (cli.agent_node_id) |old_node_id| {
+                    allocator.free(old_node_id);
+                }
+                cli.agent_node_id = try allocator.dupe(u8, node_id);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--profile")) {
+                const profile_name = args.next() orelse {
+                    printUsage();
+                    return error.MissingAgentProfile;
+                };
+
+                if (cli.agent_profile_name) |old_profile_name| {
+                    allocator.free(old_profile_name);
+                }
+                cli.agent_profile_name = try allocator.dupe(u8, profile_name);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--listen")) {
+                const listen = args.next() orelse {
+                    printUsage();
+                    return error.MissingAgentListenAddress;
+                };
+
+                if (cli.agent_listen) |old_listen| {
+                    allocator.free(old_listen);
+                }
+                cli.agent_listen = try allocator.dupe(u8, listen);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--once")) {
+                cli.agent_once = true;
+                continue;
+            }
+
             printUsage();
             return error.UnknownArgument;
         }
@@ -518,6 +602,7 @@ fn parseCheckKind(value: []const u8) !check.ArtifactKind {
     if (std.mem.eql(u8, value, "auto")) return .auto;
     if (std.mem.eql(u8, value, "onnx")) return .onnx;
     if (std.mem.eql(u8, value, "wasm")) return .wasm;
+    if (std.mem.eql(u8, value, "workload")) return .workload;
     return error.InvalidCheckKind;
 }
 
@@ -546,7 +631,8 @@ fn printUsage() void {
     std.debug.print(
         \\usage:
         \\  zug scope
-        \\  zug check <file.onnx|file.wasm> [--kind auto|onnx|wasm] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
+        \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once]
+        \\  zug check <file.onnx|file.wasm|workload/> [--kind auto|onnx|wasm|workload] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
         \\  zug bench <model.onnx> --input name=file.f32 [--warmup count] [--iterations count] [--format text|json] [--trace]
         \\  zug <model.onnx> [--input name=file.f32] [--output name=file.raw] [--expect name=file.raw] [--tolerance value]
@@ -564,6 +650,10 @@ fn printUsage() void {
         \\  --manifest checks runtime requirements before execution
         \\  --model exposes a host-managed model to zug_nn.load_preloaded_graph
         \\  --model-offset also writes that model into guest memory for legacy guests
+        \\
+        \\agent:
+        \\  serves GET /health and GET /capabilities over HTTP
+        \\  --once accepts one TCP request and then exits
         \\
     , .{});
 }
@@ -1117,6 +1207,13 @@ fn printWasmResult(result: ?wasm_interpreter.Value) void {
             .i64 => |actual| std.debug.print("i64 {d}", .{@as(i64, @bitCast(actual))}),
             .f32 => |actual| std.debug.print("f32 {d}", .{actual}),
             .f64 => |actual| std.debug.print("f64 {d}", .{actual}),
+            .funcref => |actual| {
+                if (actual) |function_index| {
+                    std.debug.print("funcref {d}", .{function_index});
+                } else {
+                    std.debug.print("funcref null", .{});
+                }
+            },
             .v128 => |actual| {
                 std.debug.print("v128", .{});
                 for (actual) |byte| {

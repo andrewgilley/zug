@@ -1,9 +1,8 @@
 const std = @import("std");
-const onnx = @import("proto/onnx.pb.zig");
-const executor = @import("executor.zig");
+const session = @import("session.zig");
 const tensor = @import("tensor.zig");
 
-const max_model_bytes = 100 * 1024 * 1024;
+const max_model_bytes = session.max_model_bytes;
 
 pub const GraphEncoding = enum {
     onnx,
@@ -34,19 +33,17 @@ pub const TensorDescriptor = struct {
 const Graph = struct {
     encoding: GraphEncoding,
     target: ExecutionTarget,
-    model: onnx.ModelProto,
+    model_bytes: []u8,
 
     fn deinit(self: *Graph, allocator: std.mem.Allocator) void {
-        self.model.deinit(allocator);
+        allocator.free(self.model_bytes);
         self.* = undefined;
     }
 };
 
 const ExecutionContext = struct {
     graph: *Graph,
-    run: executor.Executor,
-    outputs: []const executor.Output = &.{},
-    computed: bool = false,
+    run: session.Session,
 
     fn deinit(self: *ExecutionContext) void {
         self.run.deinit();
@@ -91,7 +88,11 @@ pub const Host = struct {
         if (target != .cpu) return error.UnsupportedExecutionTarget;
         if (model_bytes.len > max_model_bytes) return error.ModelTooLarge;
 
-        var reader: std.Io.Reader = .fixed(model_bytes);
+        var validated = try session.loadOnnxFromBytes(self.allocator, model_bytes);
+        defer validated.deinit();
+
+        const owned_model_bytes = try self.allocator.dupe(u8, model_bytes);
+        errdefer self.allocator.free(owned_model_bytes);
 
         const graph = try self.allocator.create(Graph);
         errdefer self.allocator.destroy(graph);
@@ -99,7 +100,7 @@ pub const Host = struct {
         graph.* = .{
             .encoding = encoding,
             .target = target,
-            .model = try onnx.ModelProto.decode(&reader, self.allocator),
+            .model_bytes = owned_model_bytes,
         };
         errdefer graph.deinit(self.allocator);
 
@@ -115,7 +116,7 @@ pub const Host = struct {
     ) !ExecutionContextHandle {
         const graph = try self.graphPtr(graph_handle);
 
-        var run = try executor.Executor.init(self.allocator, &graph.model);
+        var run = try session.loadOnnxFromBytes(self.allocator, graph.model_bytes);
         errdefer run.deinit();
 
         const context = try self.allocator.create(ExecutionContext);
@@ -141,11 +142,8 @@ pub const Host = struct {
         try requireFloat32(value);
 
         const context = try self.contextPtr(context_handle);
-        const owned = try cloneTensor(self.allocator, value);
 
-        try context.run.setInput(name, owned);
-        context.computed = false;
-        context.outputs = &.{};
+        try context.run.setInputCopy(self.allocator, name, value);
     }
 
     pub fn setInputByIndex(
@@ -154,10 +152,11 @@ pub const Host = struct {
         index: usize,
         value: *const tensor.Tensor,
     ) !void {
-        const context = try self.contextPtr(context_handle);
-        const name = try graphInputNameByIndex(context.graph, index);
+        try requireFloat32(value);
 
-        try self.setInput(context_handle, name, value);
+        const context = try self.contextPtr(context_handle);
+
+        try context.run.setInputCopyByIndex(self.allocator, index, value);
     }
 
     pub fn compute(
@@ -166,8 +165,7 @@ pub const Host = struct {
     ) !void {
         const context = try self.contextPtr(context_handle);
 
-        context.outputs = try context.run.execute();
-        context.computed = true;
+        _ = try context.run.execute();
     }
 
     pub fn outputCount(
@@ -175,9 +173,11 @@ pub const Host = struct {
         context_handle: ExecutionContextHandle,
     ) !usize {
         const context = try self.contextPtr(context_handle);
-        if (!context.computed) return error.ContextNotComputed;
 
-        return context.outputs.len;
+        return context.run.outputCount() catch |err| switch (err) {
+            error.SessionNotExecuted => error.ContextNotComputed,
+            else => err,
+        };
     }
 
     pub fn getOutput(
@@ -186,10 +186,11 @@ pub const Host = struct {
         index: usize,
     ) !Output {
         const context = try self.contextPtr(context_handle);
-        if (!context.computed) return error.ContextNotComputed;
-        if (index >= context.outputs.len) return error.OutputIndexOutOfBounds;
 
-        const output = context.outputs[index];
+        const output = context.run.output(index) catch |err| switch (err) {
+            error.SessionNotExecuted => return error.ContextNotComputed,
+            else => return err,
+        };
         return .{
             .name = output.name,
             .value = output.value,
@@ -224,41 +225,6 @@ fn requireFloat32(value: *const tensor.Tensor) !void {
     _ = try value.float32Data();
 }
 
-fn cloneTensor(allocator: std.mem.Allocator, value: *const tensor.Tensor) !tensor.Tensor {
-    return switch (value.data) {
-        .float32 => |data| tensor.Tensor.initFloat32(allocator, value.shape, data),
-        .int64 => |data| tensor.Tensor.initInt64(allocator, value.shape, data),
-        .int32 => |data| tensor.Tensor.initInt32(allocator, value.shape, data),
-        .uint8 => |data| tensor.Tensor.initUint8(allocator, value.shape, data),
-        .bool => |data| tensor.Tensor.initBool(allocator, value.shape, data),
-    };
-}
-
-fn graphInputNameByIndex(graph: *const Graph, target_index: usize) ![]const u8 {
-    const graph_proto = graph.model.graph orelse return error.MissingGraph;
-
-    var visible_index: usize = 0;
-    for (graph_proto.input.items) |*input| {
-        const name = input.name orelse return error.MissingInputName;
-        if (isInitializerName(&graph_proto, name)) continue;
-
-        if (visible_index == target_index) return name;
-        visible_index += 1;
-    }
-
-    return error.InputIndexOutOfBounds;
-}
-
-fn isInitializerName(graph: *const onnx.GraphProto, name: []const u8) bool {
-    for (graph.initializer.items) |*initializer| {
-        if (initializer.name) |initializer_name| {
-            if (std.mem.eql(u8, initializer_name, name)) return true;
-        }
-    }
-
-    return false;
-}
-
 test "host runs onnx graph through wasi-nn shaped calls" {
     const allocator = std.testing.allocator;
 
@@ -275,6 +241,7 @@ test "host runs onnx graph through wasi-nn shaped calls" {
 
     const graph = try host.loadGraph(.onnx, .cpu, model_bytes);
     const context = try host.initExecutionContext(graph);
+    try std.testing.expectError(error.ContextNotComputed, host.outputCount(context));
 
     const input_shape = [_]usize{ 1, 1, 28, 28 };
     var input = try tensor.Tensor.initZerosFloat32(allocator, &input_shape);

@@ -444,7 +444,9 @@ fn statusFromError(err: anyerror) Status {
         error.InvalidGraphHandle => .invalid_graph_handle,
         error.InvalidExecutionContextHandle => .invalid_context_handle,
 
-        error.ContextNotComputed => .context_not_computed,
+        error.ContextNotComputed,
+        error.SessionNotExecuted,
+        => .context_not_computed,
         error.OutputIndexOutOfBounds => .invalid_output,
 
         error.InputIndexOutOfBounds,

@@ -6,6 +6,7 @@ const instance = @import("instance.zig");
 const module = @import("module.zig");
 
 pub const Value = union(enum) {
+    funcref: ?u32,
     i32: u32,
     i64: u64,
     f32: f32,
@@ -947,6 +948,16 @@ pub const Interpreter = struct {
                 },
                 0xfc => try self.executePrefixedInstruction(reader, stack),
                 0xfd => try self.executeSimdInstruction(reader, stack),
+                0xd0 => {
+                    const heap_type = try reader.readByte();
+                    if (heap_type != 0x70) return error.UnsupportedReferenceType;
+                    try stack.append(self.instance.allocator, .{ .funcref = null });
+                },
+                0xd2 => {
+                    const function_index = try reader.readVarU32();
+                    _ = try self.instance.functionTypeIndex(function_index);
+                    try stack.append(self.instance.allocator, .{ .funcref = function_index });
+                },
                 else => return error.UnsupportedWasmOpcode,
             }
         }
@@ -994,8 +1005,16 @@ pub const Interpreter = struct {
                 const value = try valueAsF64(try popValue(stack));
                 try stack.append(self.instance.allocator, .{ .i64 = truncSatF64ToI64U(value) });
             },
+            0x08 => try self.executeMemoryInit(reader, stack),
+            0x09 => try self.executeDataDrop(reader),
             0x0a => try self.executeMemoryCopy(reader, stack),
             0x0b => try self.executeMemoryFill(reader, stack),
+            0x0c => try self.executeTableInit(reader, stack),
+            0x0d => try self.executeElementDrop(reader),
+            0x0e => try self.executeTableCopy(reader, stack),
+            0x0f => try self.executeTableGrow(reader, stack),
+            0x10 => try self.executeTableSize(reader, stack),
+            0x11 => try self.executeTableFill(reader, stack),
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -1093,6 +1112,103 @@ pub const Interpreter = struct {
                     self.instance.memory_bytes[source_range.start + index];
             }
         }
+    }
+
+    fn executeMemoryInit(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const data_index = try reader.readVarU32();
+        const memory_index = try reader.readByte();
+        if (memory_index != 0) return error.UnsupportedMemoryIndex;
+
+        const len = try valueAsI32(try popValue(stack));
+        const source = try valueAsI32(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        try self.instance.memoryInit(data_index, destination, source, len);
+    }
+
+    fn executeDataDrop(
+        self: *Interpreter,
+        reader: *binary.Reader,
+    ) !void {
+        const data_index = try reader.readVarU32();
+        try self.instance.dataDrop(data_index);
+    }
+
+    fn executeTableInit(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const element_index = try reader.readVarU32();
+        const table_index = try reader.readVarU32();
+
+        const len = try valueAsI32(try popValue(stack));
+        const source = try valueAsI32(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        try self.instance.tableInit(element_index, table_index, destination, source, len);
+    }
+
+    fn executeElementDrop(
+        self: *Interpreter,
+        reader: *binary.Reader,
+    ) !void {
+        const element_index = try reader.readVarU32();
+        try self.instance.elementDrop(element_index);
+    }
+
+    fn executeTableCopy(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const destination_table_index = try reader.readVarU32();
+        const source_table_index = try reader.readVarU32();
+
+        const len = try valueAsI32(try popValue(stack));
+        const source = try valueAsI32(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        try self.instance.tableCopy(destination_table_index, source_table_index, destination, source, len);
+    }
+
+    fn executeTableGrow(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const table_index = try reader.readVarU32();
+        const delta = try valueAsI32(try popValue(stack));
+        const value = try valueAsFuncref(try popValue(stack));
+
+        const previous = try self.instance.tableGrow(table_index, value, delta);
+        try stack.append(self.instance.allocator, .{ .i32 = previous orelse std.math.maxInt(u32) });
+    }
+
+    fn executeTableSize(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const table_index = try reader.readVarU32();
+        try stack.append(self.instance.allocator, .{ .i32 = try self.instance.tableSize(table_index) });
+    }
+
+    fn executeTableFill(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const table_index = try reader.readVarU32();
+        const len = try valueAsI32(try popValue(stack));
+        const value = try valueAsFuncref(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        try self.instance.tableFill(table_index, destination, value, len);
     }
 
     fn executeMemoryFill(
@@ -1299,6 +1415,7 @@ fn readLocalDeclarations(
                 0x7d => try locals.append(allocator, .{ .f32 = 0 }),
                 0x7c => try locals.append(allocator, .{ .f64 = 0 }),
                 0x7b => try locals.append(allocator, .{ .v128 = [_]u8{0} ** 16 }),
+                0x70 => try locals.append(allocator, .{ .funcref = null }),
                 else => return error.UnsupportedLocalType,
             }
         }
@@ -1340,6 +1457,7 @@ fn resultFromImport(function_type: module.FunctionType, result: u32) !?Value {
 
 fn valueMatchesType(value: Value, value_type: module.ValueType) bool {
     return switch (value_type) {
+        .funcref => std.meta.activeTag(value) == .funcref,
         .i32 => std.meta.activeTag(value) == .i32,
         .i64 => std.meta.activeTag(value) == .i64,
         .f32 => std.meta.activeTag(value) == .f32,
@@ -1350,6 +1468,7 @@ fn valueMatchesType(value: Value, value_type: module.ValueType) bool {
 
 fn valueFromConst(value: module.ConstValue) Value {
     return switch (value) {
+        .funcref => |actual| .{ .funcref = actual },
         .i32 => |actual| .{ .i32 = actual },
         .i64 => |actual| .{ .i64 = actual },
         .f32 => |actual| .{ .f32 = actual },
@@ -1360,6 +1479,10 @@ fn valueFromConst(value: module.ConstValue) Value {
 
 fn constValueFromValue(value: Value, value_type: module.ValueType) !module.ConstValue {
     return switch (value_type) {
+        .funcref => switch (value) {
+            .funcref => |actual| .{ .funcref = actual },
+            else => error.ExpectedFuncrefValue,
+        },
         .i32 => .{ .i32 = try valueAsI32(value) },
         .i64 => .{ .i64 = try valueAsI64(value) },
         .f32 => switch (value) {
@@ -1379,6 +1502,7 @@ fn constValueFromValue(value: Value, value_type: module.ValueType) !module.Const
 
 fn argFromValue(value: Value) !imports.Arg {
     return switch (value) {
+        .funcref => error.UnsupportedImportParamType,
         .i32 => |actual| .{ .i32 = actual },
         .i64 => |actual| .{ .i64 = actual },
         .f32 => |actual| .{ .f32 = actual },
@@ -1422,7 +1546,7 @@ fn readSelectTypeVector(reader: *binary.Reader) !void {
     if (count != 1) return error.UnsupportedSelectTypeVector;
 
     switch (try reader.readByte()) {
-        0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
+        0x70, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedValueType,
     }
 }
@@ -1495,7 +1619,7 @@ fn readBlockType(reader: *binary.Reader) !void {
     const block_type = try reader.readByte();
 
     switch (block_type) {
-        0x40, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
+        0x40, 0x70, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b => {},
         else => return error.UnsupportedBlockType,
     }
 }
@@ -1530,6 +1654,11 @@ fn skipInstructionImmediate(reader: *binary.Reader, opcode: u8) !void {
         0x44 => _ = try reader.readBytes(8),
         0xfc => try skipPrefixedInstructionImmediate(reader),
         0xfd => try skipSimdInstructionImmediate(reader),
+        0xd0 => {
+            const heap_type = try reader.readByte();
+            if (heap_type != 0x70) return error.UnsupportedReferenceType;
+        },
+        0xd2 => _ = try reader.readVarU32(),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1539,6 +1668,12 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
 
     switch (subopcode) {
         0x00...0x07 => {},
+        0x08 => {
+            _ = try reader.readVarU32();
+            const memory_index = try reader.readByte();
+            if (memory_index != 0) return error.UnsupportedMemoryIndex;
+        },
+        0x09 => _ = try reader.readVarU32(),
         0x0a => {
             const destination_memory_index = try reader.readByte();
             const source_memory_index = try reader.readByte();
@@ -1548,6 +1683,16 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
             const memory_index = try reader.readByte();
             if (memory_index != 0) return error.UnsupportedMemoryIndex;
         },
+        0x0c => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+        },
+        0x0d => _ = try reader.readVarU32(),
+        0x0e => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+        },
+        0x0f, 0x10, 0x11 => _ = try reader.readVarU32(),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1626,6 +1771,13 @@ fn valueAsV128(value: Value) ![16]u8 {
     return switch (value) {
         .v128 => |actual| actual,
         else => error.ExpectedV128Value,
+    };
+}
+
+fn valueAsFuncref(value: Value) !?u32 {
+    return switch (value) {
+        .funcref => |actual| actual,
+        else => error.ExpectedFuncrefValue,
     };
 }
 
@@ -2312,6 +2464,57 @@ test "interpreter executes prefixed numeric and memory ops" {
     try std.testing.expectEqual(@as(u32, 6), try valueAsI32(result));
     try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(8, 1))[0]);
     try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(11, 1))[0]);
+}
+
+test "interpreter executes passive data memory init and drop" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.passive_data_memory_init);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 0x4d534157), try valueAsI32(result));
+    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory.read(8, 4));
+    try std.testing.expectError(error.DataSegmentDropped, wasm_instance.memoryInit(0, 16, 0, 1));
+}
+
+test "interpreter executes passive element table init and drop" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.passive_element_table_init);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 18), try valueAsI32(result));
+    try std.testing.expectError(error.ElementSegmentDropped, wasm_instance.tableInit(0, 0, 0, 0, 1));
+}
+
+test "interpreter executes table copy grow size and fill" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.table_copy_grow_size_fill);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 22), try valueAsI32(result));
+    try std.testing.expectEqual(@as(u32, 4), try wasm_instance.tableSize(0));
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.tableFunctionIndex(0, 0));
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 2));
 }
 
 test "interpreter executes initial simd i32x4 ops" {

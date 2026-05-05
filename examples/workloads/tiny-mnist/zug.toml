@@ -1,0 +1,19 @@
+name = "tiny-mnist"
+entrypoint = "run"
+wasm = "../../../zig-out/wasi_nn_full.wasm"
+model = "../../../models/tiny_mnist.onnx"
+model_encoding = "onnx"
+
+[requires]
+wasi_nn = true
+memory = "2MiB"
+dtype = "float32"
+target = "vision-f32-basic"
+
+[network]
+input = "local"
+output = "stdout"
+ingress = "http"
+egress = "https"
+max_inflight = 4
+request_timeout_ms = 5000

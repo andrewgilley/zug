@@ -120,15 +120,17 @@ const Validator = struct {
 
     fn validateElements(self: *Validator) !void {
         for (self.parsed.element_segments.items) |segment| {
-            const table_index = std.math.cast(usize, segment.table_index) orelse return error.InvalidTableIndex;
-            if (table_index >= self.parsed.tables.items.len) return error.InvalidTableIndex;
+            if (!segment.passive) {
+                const table_index = std.math.cast(usize, segment.table_index) orelse return error.InvalidTableIndex;
+                if (table_index >= self.parsed.tables.items.len) return error.InvalidTableIndex;
 
-            const table_min = std.math.cast(usize, self.parsed.tables.items[table_index].limits.min) orelse {
-                return error.TableTooLarge;
-            };
-            const offset = std.math.cast(usize, segment.offset) orelse return error.InvalidTableElementIndex;
-            const end = try std.math.add(usize, offset, segment.function_indices.len);
-            if (end > table_min) return error.InvalidTableElementIndex;
+                const table_min = std.math.cast(usize, self.parsed.tables.items[table_index].limits.min) orelse {
+                    return error.TableTooLarge;
+                };
+                const offset = std.math.cast(usize, segment.offset) orelse return error.InvalidTableElementIndex;
+                const end = try std.math.add(usize, offset, segment.function_indices.len);
+                if (end > table_min) return error.InvalidTableElementIndex;
+            }
 
             for (segment.function_indices) |function_index| {
                 _ = try self.functionTypeIndex(function_index);
@@ -138,6 +140,8 @@ const Validator = struct {
 
     fn validateData(self: *Validator) !void {
         for (self.parsed.data_segments.items) |segment| {
+            if (segment.passive) continue;
+
             const memory_index = std.math.cast(usize, segment.memory_index) orelse return error.InvalidMemoryIndex;
             if (memory_index >= self.parsed.memories.items.len) return error.InvalidMemoryIndex;
 
@@ -149,6 +153,16 @@ const Validator = struct {
             const end = try std.math.add(usize, offset, segment.bytes.len);
             if (end > min_bytes) return error.DataSegmentOutOfBounds;
         }
+    }
+
+    fn validateDataIndex(self: *const Validator, data_index: u32) !void {
+        const actual = std.math.cast(usize, data_index) orelse return error.InvalidDataSegmentIndex;
+        if (actual >= self.parsed.data_segments.items.len) return error.InvalidDataSegmentIndex;
+    }
+
+    fn validateElementIndex(self: *const Validator, element_index: u32) !void {
+        const actual = std.math.cast(usize, element_index) orelse return error.InvalidElementSegmentIndex;
+        if (actual >= self.parsed.element_segments.items.len) return error.InvalidElementSegmentIndex;
     }
 
     fn validateFunctions(self: *Validator) !void {
@@ -436,6 +450,8 @@ const ExpressionValidator = struct {
             0xc2...0xc4 => try self.validateUnary(.i64, .i64),
             0xfc => try self.validatePrefixedInstruction(reader),
             0xfd => try self.validateSimdInstruction(reader),
+            0xd0 => try self.validateRefNull(reader),
+            0xd2 => try self.validateRefFunc(reader),
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -448,8 +464,16 @@ const ExpressionValidator = struct {
             0x02, 0x03 => try self.validateUnary(.f64, .i32),
             0x04, 0x05 => try self.validateUnary(.f32, .i64),
             0x06, 0x07 => try self.validateUnary(.f64, .i64),
+            0x08 => try self.validateMemoryInit(reader),
+            0x09 => try self.validateDataDrop(reader),
             0x0a => try self.validateMemoryCopy(reader),
             0x0b => try self.validateMemoryFill(reader),
+            0x0c => try self.validateTableInit(reader),
+            0x0d => try self.validateElementDrop(reader),
+            0x0e => try self.validateTableCopy(reader),
+            0x0f => try self.validateTableGrow(reader),
+            0x10 => try self.validateTableSize(reader),
+            0x11 => try self.validateTableFill(reader),
             else => return error.UnsupportedWasmOpcode,
         }
     }
@@ -484,6 +508,87 @@ const ExpressionValidator = struct {
         try self.pop(.i32);
         try self.pop(.i32);
         try self.pop(.i32);
+    }
+
+    fn validateMemoryInit(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const data_index = try reader.readVarU32();
+        const memory_index = try reader.readByte();
+        if (memory_index != 0) return error.UnsupportedMemoryIndex;
+        if (!self.validator.hasMemory()) return error.MissingMemory;
+        try self.validator.validateDataIndex(data_index);
+
+        try self.pop(.i32);
+        try self.pop(.i32);
+        try self.pop(.i32);
+    }
+
+    fn validateDataDrop(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const data_index = try reader.readVarU32();
+        try self.validator.validateDataIndex(data_index);
+    }
+
+    fn validateTableInit(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const element_index = try reader.readVarU32();
+        const table_index = try reader.readVarU32();
+        try self.validator.validateElementIndex(element_index);
+        if (!self.validator.hasTable(table_index)) return error.MissingTable;
+
+        try self.pop(.i32);
+        try self.pop(.i32);
+        try self.pop(.i32);
+    }
+
+    fn validateElementDrop(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const element_index = try reader.readVarU32();
+        try self.validator.validateElementIndex(element_index);
+    }
+
+    fn validateTableCopy(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const destination_table_index = try reader.readVarU32();
+        const source_table_index = try reader.readVarU32();
+        if (!self.validator.hasTable(destination_table_index)) return error.MissingTable;
+        if (!self.validator.hasTable(source_table_index)) return error.MissingTable;
+
+        try self.pop(.i32);
+        try self.pop(.i32);
+        try self.pop(.i32);
+    }
+
+    fn validateTableGrow(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const table_index = try reader.readVarU32();
+        if (!self.validator.hasTable(table_index)) return error.MissingTable;
+
+        try self.pop(.i32);
+        try self.pop(.funcref);
+        try self.push(.i32);
+    }
+
+    fn validateTableSize(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const table_index = try reader.readVarU32();
+        if (!self.validator.hasTable(table_index)) return error.MissingTable;
+
+        try self.push(.i32);
+    }
+
+    fn validateTableFill(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const table_index = try reader.readVarU32();
+        if (!self.validator.hasTable(table_index)) return error.MissingTable;
+
+        try self.pop(.i32);
+        try self.pop(.funcref);
+        try self.pop(.i32);
+    }
+
+    fn validateRefNull(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const heap_type = try reader.readByte();
+        if (heap_type != 0x70) return error.UnsupportedReferenceType;
+        try self.push(.funcref);
+    }
+
+    fn validateRefFunc(self: *ExpressionValidator, reader: *binary.Reader) !void {
+        const function_index = try reader.readVarU32();
+        _ = try self.validator.functionTypeIndex(function_index);
+        try self.push(.funcref);
     }
 
     fn validateMemoryFill(self: *ExpressionValidator, reader: *binary.Reader) !void {
@@ -819,6 +924,7 @@ fn readBlockType(reader: *binary.Reader) !BlockType {
 
     return switch (block_type) {
         0x40 => .{},
+        0x70 => .{ .result = .funcref },
         0x7f => .{ .result = .i32 },
         0x7e => .{ .result = .i64 },
         0x7d => .{ .result = .f32 },
@@ -837,6 +943,7 @@ fn readSelectTypeVector(reader: *binary.Reader) !module.ValueType {
 
 fn valueTypeFromByte(value: u8) !module.ValueType {
     return switch (value) {
+        0x70 => .funcref,
         0x7f => .i32,
         0x7e => .i64,
         0x7d => .f32,
@@ -952,6 +1059,11 @@ fn skipInstructionImmediate(reader: *binary.Reader, opcode: u8) !void {
         0x44 => _ = try reader.readBytes(8),
         0xfc => try skipPrefixedInstructionImmediate(reader),
         0xfd => try skipSimdInstructionImmediate(reader),
+        0xd0 => {
+            const heap_type = try reader.readByte();
+            if (heap_type != 0x70) return error.UnsupportedReferenceType;
+        },
+        0xd2 => _ = try reader.readVarU32(),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -961,6 +1073,12 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
 
     switch (subopcode) {
         0x00...0x07 => {},
+        0x08 => {
+            _ = try reader.readVarU32();
+            const memory_index = try reader.readByte();
+            if (memory_index != 0) return error.UnsupportedMemoryIndex;
+        },
+        0x09 => _ = try reader.readVarU32(),
         0x0a => {
             const destination_memory_index = try reader.readByte();
             const source_memory_index = try reader.readByte();
@@ -970,6 +1088,11 @@ fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
             const memory_index = try reader.readByte();
             if (memory_index != 0) return error.UnsupportedMemoryIndex;
         },
+        0x0c, 0x0e => {
+            _ = try reader.readVarU32();
+            _ = try reader.readVarU32();
+        },
+        0x0d, 0x0f, 0x10, 0x11 => _ = try reader.readVarU32(),
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1012,6 +1135,9 @@ test "validator accepts supported runtime fixtures" {
         fixtures.numeric_i64_and_float_ops,
         fixtures.float_conversion_ops,
         fixtures.prefixed_numeric_and_memory_ops,
+        fixtures.passive_data_memory_init,
+        fixtures.passive_element_table_init,
+        fixtures.table_copy_grow_size_fill,
         fixtures.simd_i32x4_memory_ops,
         fixtures.extended_i64_memory_ops,
         fixtures.globals_and_start,

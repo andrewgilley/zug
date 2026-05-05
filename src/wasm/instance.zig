@@ -15,6 +15,12 @@ pub const RuntimeTable = struct {
     elements: []?u32,
 };
 
+const IndexRange = struct {
+    start: usize,
+    end: usize,
+    len: usize,
+};
+
 pub const Instance = struct {
     allocator: std.mem.Allocator,
     module: *const module.Module,
@@ -24,6 +30,8 @@ pub const Instance = struct {
     imported_functions: []imports.Function = &.{},
     globals: []RuntimeGlobal = &.{},
     tables: []RuntimeTable = &.{},
+    dropped_element_segments: []bool = &.{},
+    dropped_data_segments: []bool = &.{},
     start_executed: bool = false,
 
     pub fn init(
@@ -69,6 +77,12 @@ pub const Instance = struct {
         }
         if (self.tables.len != 0) {
             self.allocator.free(self.tables);
+        }
+        if (self.dropped_element_segments.len != 0) {
+            self.allocator.free(self.dropped_element_segments);
+        }
+        if (self.dropped_data_segments.len != 0) {
+            self.allocator.free(self.dropped_data_segments);
         }
         self.allocator.free(self.memory_bytes);
         self.* = undefined;
@@ -205,6 +219,110 @@ pub const Instance = struct {
         return self.tables[actual_table].elements[actual_element] orelse error.UninitializedTableElement;
     }
 
+    pub fn tableInit(
+        self: *Instance,
+        element_index: u32,
+        table_index: u32,
+        destination: u32,
+        source: u32,
+        len: u32,
+    ) !void {
+        const segment = try self.elementSegment(element_index);
+        if (try self.elementSegmentDropped(element_index)) return error.ElementSegmentDropped;
+
+        const actual_table = std.math.cast(usize, table_index) orelse return error.InvalidTableIndex;
+        if (actual_table >= self.tables.len) return error.InvalidTableIndex;
+
+        const source_range = try checkedRange(segment.function_indices.len, source, len);
+        const destination_range = try checkedRange(self.tables[actual_table].elements.len, destination, len);
+
+        for (
+            self.tables[actual_table].elements[destination_range.start..destination_range.end],
+            segment.function_indices[source_range.start..source_range.end],
+        ) |*slot, function_index| {
+            const actual_function = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
+            if (actual_function >= self.functionCount()) return error.InvalidFunctionIndex;
+            slot.* = function_index;
+        }
+    }
+
+    pub fn tableCopy(
+        self: *Instance,
+        destination_table_index: u32,
+        source_table_index: u32,
+        destination: u32,
+        source: u32,
+        len: u32,
+    ) !void {
+        const destination_table = try self.tableIndex(destination_table_index);
+        const source_table = try self.tableIndex(source_table_index);
+        const source_range = try checkedRange(self.tables[source_table].elements.len, source, len);
+        const destination_range = try checkedRange(self.tables[destination_table].elements.len, destination, len);
+
+        if (destination_table == source_table and destination_range.start > source_range.start) {
+            var index = source_range.len;
+            while (index > 0) {
+                index -= 1;
+                self.tables[destination_table].elements[destination_range.start + index] =
+                    self.tables[source_table].elements[source_range.start + index];
+            }
+        } else {
+            for (0..source_range.len) |index| {
+                self.tables[destination_table].elements[destination_range.start + index] =
+                    self.tables[source_table].elements[source_range.start + index];
+            }
+        }
+    }
+
+    pub fn tableSize(self: *const Instance, table_index: u32) !u32 {
+        const actual_table = try self.tableIndex(table_index);
+        return std.math.cast(u32, self.tables[actual_table].elements.len) orelse error.TableTooLarge;
+    }
+
+    pub fn tableGrow(self: *Instance, table_index: u32, value: ?u32, delta: u32) !?u32 {
+        try self.validateFunctionRef(value);
+
+        const actual_table = try self.tableIndex(table_index);
+        const old_size = try self.tableSize(table_index);
+        const new_size = std.math.add(u32, old_size, delta) catch return null;
+        const max_size = self.module.tables.items[actual_table].limits.max orelse std.math.maxInt(u32);
+        if (new_size > max_size) return null;
+        if (delta == 0) return old_size;
+
+        const new_len = std.math.cast(usize, new_size) orelse return null;
+        const old_len = self.tables[actual_table].elements.len;
+        const grown = self.allocator.realloc(self.tables[actual_table].elements, new_len) catch return null;
+        for (grown[old_len..]) |*slot| {
+            slot.* = value;
+        }
+        self.tables[actual_table].elements = grown;
+
+        return old_size;
+    }
+
+    pub fn tableFill(
+        self: *Instance,
+        table_index: u32,
+        destination: u32,
+        value: ?u32,
+        len: u32,
+    ) !void {
+        try self.validateFunctionRef(value);
+
+        const actual_table = try self.tableIndex(table_index);
+        const range = try checkedRange(self.tables[actual_table].elements.len, destination, len);
+        for (self.tables[actual_table].elements[range.start..range.end]) |*slot| {
+            slot.* = value;
+        }
+    }
+
+    pub fn elementDrop(self: *Instance, element_index: u32) !void {
+        _ = try self.elementSegment(element_index);
+
+        const actual = std.math.cast(usize, element_index) orelse return error.InvalidElementSegmentIndex;
+        self.dropped_element_segments[actual] = true;
+    }
+
     pub fn global(self: *const Instance, index: u32) !RuntimeGlobal {
         const actual = std.math.cast(usize, index) orelse return error.InvalidGlobalIndex;
         const imported_count = self.importedGlobalCount();
@@ -265,6 +383,32 @@ pub const Instance = struct {
         return old_pages;
     }
 
+    pub fn memoryInit(
+        self: *Instance,
+        data_index: u32,
+        destination: u32,
+        source: u32,
+        len: u32,
+    ) !void {
+        const segment = try self.dataSegment(data_index);
+        if (try self.dataSegmentDropped(data_index)) return error.DataSegmentDropped;
+
+        const source_range = try checkedRange(segment.bytes.len, source, len);
+        const destination_range = try checkedRange(self.memory_bytes.len, destination, len);
+
+        @memcpy(
+            self.memory_bytes[destination_range.start..destination_range.end],
+            segment.bytes[source_range.start..source_range.end],
+        );
+    }
+
+    pub fn dataDrop(self: *Instance, data_index: u32) !void {
+        _ = try self.dataSegment(data_index);
+
+        const actual = std.math.cast(usize, data_index) orelse return error.InvalidDataSegmentIndex;
+        self.dropped_data_segments[actual] = true;
+    }
+
     fn initGlobals(self: *Instance) !void {
         if (self.importedGlobalCount() != 0) return error.ImportedGlobalsUnsupported;
         if (self.module.globals.items.len == 0) return;
@@ -284,8 +428,12 @@ pub const Instance = struct {
 
     fn initTables(self: *Instance) !void {
         if (self.importedTableCount() != 0) return error.ImportedTablesUnsupported;
+        try self.initElementSegmentState();
+
         if (self.module.tables.items.len == 0) {
-            if (self.module.element_segments.items.len != 0) return error.MissingTable;
+            for (self.module.element_segments.items) |segment| {
+                if (!segment.passive) return error.MissingTable;
+            }
             return;
         }
 
@@ -307,8 +455,26 @@ pub const Instance = struct {
         try self.applyElementSegments();
     }
 
+    fn initDataSegmentState(self: *Instance) !void {
+        if (self.module.data_segments.items.len == 0) return;
+
+        const dropped = try self.allocator.alloc(bool, self.module.data_segments.items.len);
+        @memset(dropped, false);
+        self.dropped_data_segments = dropped;
+    }
+
+    fn initElementSegmentState(self: *Instance) !void {
+        if (self.module.element_segments.items.len == 0) return;
+
+        const dropped = try self.allocator.alloc(bool, self.module.element_segments.items.len);
+        @memset(dropped, false);
+        self.dropped_element_segments = dropped;
+    }
+
     fn applyElementSegments(self: *Instance) !void {
         for (self.module.element_segments.items) |segment| {
+            if (segment.passive) continue;
+
             const actual_table = std.math.cast(usize, segment.table_index) orelse return error.InvalidTableIndex;
             if (actual_table >= self.tables.len) return error.InvalidTableIndex;
 
@@ -331,15 +497,70 @@ pub const Instance = struct {
     }
 
     fn applyDataSegments(self: *Instance) !void {
+        try self.initDataSegmentState();
+
         for (self.module.data_segments.items) |segment| {
+            if (segment.passive) continue;
             if (segment.memory_index != 0) return error.UnsupportedMemoryIndex;
             try self.memory.write(segment.offset, segment.bytes);
         }
     }
+
+    fn dataSegment(self: *const Instance, data_index: u32) !module.DataSegment {
+        const actual = std.math.cast(usize, data_index) orelse return error.InvalidDataSegmentIndex;
+        if (actual >= self.module.data_segments.items.len) return error.InvalidDataSegmentIndex;
+
+        return self.module.data_segments.items[actual];
+    }
+
+    fn dataSegmentDropped(self: *const Instance, data_index: u32) !bool {
+        const actual = std.math.cast(usize, data_index) orelse return error.InvalidDataSegmentIndex;
+        if (actual >= self.dropped_data_segments.len) return error.InvalidDataSegmentIndex;
+
+        return self.dropped_data_segments[actual];
+    }
+
+    fn elementSegment(self: *const Instance, element_index: u32) !module.ElementSegment {
+        const actual = std.math.cast(usize, element_index) orelse return error.InvalidElementSegmentIndex;
+        if (actual >= self.module.element_segments.items.len) return error.InvalidElementSegmentIndex;
+
+        return self.module.element_segments.items[actual];
+    }
+
+    fn elementSegmentDropped(self: *const Instance, element_index: u32) !bool {
+        const actual = std.math.cast(usize, element_index) orelse return error.InvalidElementSegmentIndex;
+        if (actual >= self.dropped_element_segments.len) return error.InvalidElementSegmentIndex;
+
+        return self.dropped_element_segments[actual];
+    }
+
+    fn tableIndex(self: *const Instance, table_index: u32) !usize {
+        const actual_table = std.math.cast(usize, table_index) orelse return error.InvalidTableIndex;
+        if (actual_table >= self.tables.len) return error.InvalidTableIndex;
+
+        return actual_table;
+    }
+
+    fn validateFunctionRef(self: *const Instance, value: ?u32) !void {
+        if (value) |function_index| {
+            const actual_function = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
+            if (actual_function >= self.functionCount()) return error.InvalidFunctionIndex;
+        }
+    }
 };
+
+fn checkedRange(container_len: usize, start_raw: u32, len_raw: u32) !IndexRange {
+    const start = std.math.cast(usize, start_raw) orelse return error.InvalidMemoryRange;
+    const len = std.math.cast(usize, len_raw) orelse return error.InvalidMemoryRange;
+    const end = try std.math.add(usize, start, len);
+    if (end > container_len) return error.InvalidMemoryRange;
+
+    return .{ .start = start, .end = end, .len = len };
+}
 
 fn constValueMatchesType(value: module.ConstValue, value_type: module.ValueType) bool {
     return switch (value_type) {
+        .funcref => std.meta.activeTag(value) == .funcref,
         .i32 => std.meta.activeTag(value) == .i32,
         .i64 => std.meta.activeTag(value) == .i64,
         .f32 => std.meta.activeTag(value) == .f32,
@@ -420,6 +641,70 @@ test "instance applies active data segments" {
 
     try std.testing.expectEqualSlices(u8, "abc", try wasm_instance.memory.read(4, 3));
     try std.testing.expectEqual(@as(usize, wasm_page_size), wasm_instance.memory_bytes.len);
+}
+
+test "instance leaves passive data for explicit memory init" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, @import("fixtures.zig").passive_data_memory_init);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, try wasm_instance.memory.read(8, 4));
+
+    try wasm_instance.memoryInit(0, 8, 1, 4);
+    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory.read(8, 4));
+
+    try wasm_instance.dataDrop(0);
+    try std.testing.expectError(error.DataSegmentDropped, wasm_instance.memoryInit(0, 16, 0, 1));
+}
+
+test "instance initializes tables from passive element segments" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, @import("fixtures.zig").passive_element_table_init);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    try std.testing.expectError(error.UninitializedTableElement, wasm_instance.tableFunctionIndex(0, 0));
+
+    try wasm_instance.tableInit(0, 0, 0, 0, 2);
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 0));
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.tableFunctionIndex(0, 1));
+
+    try wasm_instance.elementDrop(0);
+    try std.testing.expectError(error.ElementSegmentDropped, wasm_instance.tableInit(0, 0, 0, 0, 1));
+}
+
+test "instance copies grows sizes and fills tables" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, @import("fixtures.zig").table_copy_grow_size_fill);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    try wasm_instance.tableInit(0, 0, 0, 0, 2);
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 0));
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.tableFunctionIndex(0, 1));
+
+    try wasm_instance.tableCopy(0, 0, 0, 1, 1);
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.tableFunctionIndex(0, 0));
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.tableSize(0));
+
+    try std.testing.expectEqual(@as(?u32, 2), try wasm_instance.tableGrow(0, 1, 1));
+    try std.testing.expectEqual(@as(?u32, 3), try wasm_instance.tableGrow(0, null, 1));
+    try std.testing.expectEqual(@as(?u32, null), try wasm_instance.tableGrow(0, null, 1));
+    try std.testing.expectEqual(@as(u32, 4), try wasm_instance.tableSize(0));
+
+    try wasm_instance.tableFill(0, 2, 1, 2);
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 2));
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 3));
 }
 
 test "instance grows memory within declared maximum" {

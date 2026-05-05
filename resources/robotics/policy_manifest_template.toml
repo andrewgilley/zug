@@ -1,0 +1,25 @@
+# Current-schema zug.toml template for a robotics policy workload.
+# The parser currently supports only root, [requires], and [network] keys.
+# Keep robotics safety metadata in POLICY_CARD.md and SAFETY_CASE.md until
+# first-class robotics schema support is added.
+
+name = "robotics-policy"
+entrypoint = "run"
+wasm = "policy.wasm"
+model = "policy.onnx"
+model_encoding = "onnx"
+
+[requires]
+wasi_nn = true
+memory = "128MiB"
+dtype = "float32"
+target = "vision-f32-basic"
+
+[network]
+input = "local"
+output = "stdio"
+ingress = "http"
+egress = "mqtt"
+max_inflight = 1
+request_timeout_ms = 50
+public_egress = false

@@ -64,6 +64,14 @@ This file tracks modern model targets for capability inspection, ONNX op coverag
 - Expected pressure on Zug: model conversion workflow first; likely PyTorch policy artifacts before ONNX runtime testing.
 - Status: conversion target, not an ONNX fixture yet.
 
+### Robotics Policy Admission Notes
+
+- A robotics policy model should not be admitted only because it loads. It needs a policy card, safety case, action-space description, rollout evidence, and a host-side action envelope.
+- Prefer small policy fixtures first: imitation-learning policies, action-chunking transformer variants, or tiny exported policies that can run in CI.
+- Record observation shapes, action shapes, units, coordinate frames, model hash, guest hash, and target hardware.
+- Promote a policy to runtime testing only after `zug check workload/ --kind workload --json` reports a clean workload.
+- Keep final actuation outside the model runtime and behind independent industrial controls.
+
 ## Admission Rules
 
 - Prefer small or tiny models first so CI can run capability inspection quickly.

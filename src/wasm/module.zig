@@ -37,6 +37,7 @@ pub const Export = struct {
 };
 
 pub const ValueType = enum(u8) {
+    funcref = 0x70,
     i32 = 0x7f,
     i64 = 0x7e,
     f32 = 0x7d,
@@ -50,6 +51,7 @@ pub const FunctionType = struct {
 };
 
 pub const ConstValue = union(enum) {
+    funcref: ?u32,
     i32: u32,
     i64: u64,
     f32: f32,
@@ -81,12 +83,14 @@ pub const Table = struct {
 };
 
 pub const ElementSegment = struct {
+    passive: bool = false,
     table_index: u32 = 0,
     offset: u32,
     function_indices: []const u32,
 };
 
 pub const DataSegment = struct {
+    passive: bool = false,
     memory_index: u32 = 0,
     offset: u32,
     bytes: []const u8,
@@ -104,6 +108,7 @@ pub const Module = struct {
     tables: std.ArrayList(Table) = .empty,
     element_segments: std.ArrayList(ElementSegment) = .empty,
     data_segments: std.ArrayList(DataSegment) = .empty,
+    data_count: ?u32 = null,
     start_function_index: ?u32 = null,
 
     pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Module {
@@ -133,12 +138,16 @@ pub const Module = struct {
                 .element => try parseElementSection(allocator, section.payload, &result),
                 .code => try parseCodeSection(allocator, section.payload, function_type_indices.items, &result),
                 .data => try parseDataSection(allocator, section.payload, &result),
+                .data_count => try parseDataCountSection(section.payload, &result),
                 else => {},
             }
         }
 
         if (function_type_indices.items.len != result.functions.items.len) {
             return error.FunctionCodeCountMismatch;
+        }
+        if (result.data_count) |count| {
+            if (count != result.data_segments.items.len) return error.DataCountMismatch;
         }
 
         return result;
@@ -360,7 +369,14 @@ fn parseElementSection(allocator: std.mem.Allocator, payload: []const u8, parsed
                 .offset = try readI32ConstExpr(&reader),
                 .function_indices = try readFunctionIndexVector(allocator, &reader),
             },
-            1 => return error.PassiveElementSegmentUnsupported,
+            1 => blk: {
+                try readElementKind(&reader);
+                break :blk ElementSegment{
+                    .passive = true,
+                    .offset = 0,
+                    .function_indices = try readFunctionIndexVector(allocator, &reader),
+                };
+            },
             2 => blk: {
                 const table_index = try reader.readVarU32();
                 const offset = try readI32ConstExpr(&reader);
@@ -394,7 +410,11 @@ fn parseDataSection(allocator: std.mem.Allocator, payload: []const u8, parsed: *
                 .offset = try readI32ConstExpr(&reader),
                 .bytes = try readName(&reader),
             },
-            1 => return error.PassiveDataSegmentUnsupported,
+            1 => DataSegment{
+                .passive = true,
+                .offset = 0,
+                .bytes = try readName(&reader),
+            },
             2 => blk: {
                 const memory_index = try reader.readVarU32();
                 break :blk DataSegment{
@@ -409,6 +429,12 @@ fn parseDataSection(allocator: std.mem.Allocator, payload: []const u8, parsed: *
         try parsed.data_segments.append(allocator, segment);
     }
 
+    try expectSectionEnd(reader);
+}
+
+fn parseDataCountSection(payload: []const u8, parsed: *Module) !void {
+    var reader = binary.Reader.init(payload);
+    parsed.data_count = try reader.readVarU32();
     try expectSectionEnd(reader);
 }
 
@@ -443,6 +469,7 @@ fn readFunctionIndexVector(allocator: std.mem.Allocator, reader: *binary.Reader)
 
 fn valueTypeFromByte(value: u8) !ValueType {
     return switch (value) {
+        0x70 => .funcref,
         0x7f => .i32,
         0x7e => .i64,
         0x7d => .f32,
@@ -505,6 +532,16 @@ fn readConstExpr(reader: *binary.Reader, expected_type: ValueType) !ConstValue {
             var bytes: [16]u8 = undefined;
             @memcpy(bytes[0..], try reader.readBytes(16));
             break :blk .{ .v128 = bytes };
+        },
+        0xd0 => blk: {
+            if (expected_type != .funcref) return error.InvalidConstExpressionType;
+            const heap_type = try reader.readByte();
+            if (heap_type != 0x70) return error.UnsupportedReferenceType;
+            break :blk .{ .funcref = null };
+        },
+        0xd2 => blk: {
+            if (expected_type != .funcref) return error.InvalidConstExpressionType;
+            break :blk .{ .funcref = try reader.readVarU32() };
         },
         else => return error.UnsupportedConstExpression,
     };
@@ -752,6 +789,18 @@ test "module parse decodes tables and active element segments" {
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, parsed.element_segments.items[0].function_indices);
 }
 
+test "module parse decodes passive element segments" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try Module.parse(allocator, @import("fixtures.zig").passive_element_table_init);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.tables.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.element_segments.items.len);
+    try std.testing.expect(parsed.element_segments.items[0].passive);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, parsed.element_segments.items[0].function_indices);
+}
+
 test "module parse decodes active data segments" {
     const allocator = std.testing.allocator;
     const bytes =
@@ -765,7 +814,20 @@ test "module parse decodes active data segments" {
     defer parsed.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), parsed.data_segments.items.len);
+    try std.testing.expect(!parsed.data_segments.items[0].passive);
     try std.testing.expectEqual(@as(u32, 0), parsed.data_segments.items[0].memory_index);
     try std.testing.expectEqual(@as(u32, 4), parsed.data_segments.items[0].offset);
     try std.testing.expectEqualSlices(u8, "abc", parsed.data_segments.items[0].bytes);
+}
+
+test "module parse decodes passive data segments and data count" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try Module.parse(allocator, @import("fixtures.zig").passive_data_memory_init);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, 1), parsed.data_count);
+    try std.testing.expectEqual(@as(usize, 1), parsed.data_segments.items.len);
+    try std.testing.expect(parsed.data_segments.items[0].passive);
+    try std.testing.expectEqualSlices(u8, "zWASM!", parsed.data_segments.items[0].bytes);
 }
