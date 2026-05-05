@@ -33,6 +33,44 @@ pub const Issue = struct {
     detail: []const u8 = "",
 };
 
+pub const supported_operator_names = [_][]const u8{
+    "Add",
+    "AveragePool",
+    "BatchNormalization",
+    "Cast",
+    "Clip",
+    "Concat",
+    "Constant",
+    "Conv",
+    "Div",
+    "Flatten",
+    "Gather",
+    "Gemm",
+    "GlobalAveragePool",
+    "MatMul",
+    "MaxPool",
+    "Mul",
+    "Relu",
+    "Reshape",
+    "Shape",
+    "Sigmoid",
+    "Slice",
+    "Softmax",
+    "Sub",
+    "Squeeze",
+    "Tanh",
+    "Transpose",
+    "Unsqueeze",
+};
+
+pub const supported_tensor_dtype_names = [_][]const u8{
+    "FLOAT",
+    "INT64",
+    "INT32",
+    "UINT8",
+    "BOOL",
+};
+
 pub const Report = struct {
     opsets: std.ArrayList(OpSet) = .empty,
     operators: std.ArrayList(OperatorCount) = .empty,
@@ -302,19 +340,17 @@ fn isDefaultDomain(domain: []const u8) bool {
     return std.mem.eql(u8, domain, "ai.onnx");
 }
 
-fn isSupportedOperator(domain: []const u8, op_type: []const u8) bool {
+pub fn isSupportedOperator(domain: []const u8, op_type: []const u8) bool {
     if (!isDefaultDomain(domain)) return false;
 
-    return std.mem.eql(u8, op_type, "Add") or
-        std.mem.eql(u8, op_type, "Constant") or
-        std.mem.eql(u8, op_type, "Conv") or
-        std.mem.eql(u8, op_type, "Flatten") or
-        std.mem.eql(u8, op_type, "Gemm") or
-        std.mem.eql(u8, op_type, "MatMul") or
-        std.mem.eql(u8, op_type, "Softmax");
+    for (supported_operator_names) |supported| {
+        if (std.mem.eql(u8, op_type, supported)) return true;
+    }
+
+    return false;
 }
 
-fn isSupportedTensorDataType(data_type: ?i32) bool {
+pub fn isSupportedTensorDataType(data_type: ?i32) bool {
     const actual = data_type orelse return false;
     return actual == @intFromEnum(onnx.TensorProto.DataType.FLOAT) or
         actual == @intFromEnum(onnx.TensorProto.DataType.INT64) or

@@ -6,6 +6,7 @@ pub const imports = @import("imports.zig");
 pub const instance = @import("instance.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const module = @import("module.zig");
+pub const validator = @import("validator.zig");
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -25,7 +26,13 @@ pub const Runtime = struct {
         parsed_module: *const module.Module,
         initial_memory_bytes: usize,
     ) !instance.Instance {
+        try self.validateModule(parsed_module);
+
         return instance.Instance.init(self.allocator, parsed_module, initial_memory_bytes);
+    }
+
+    pub fn validateModule(self: Runtime, parsed_module: *const module.Module) !void {
+        try validator.validate(self.allocator, parsed_module);
     }
 
     pub fn instantiateStarted(

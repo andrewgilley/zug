@@ -42,6 +42,7 @@ interface inference {
     unsupported-op(string),
     buffer-too-small,
     model-too-large,
+    missing-model,
     runtime-error(string),
   }
 
@@ -50,6 +51,11 @@ interface inference {
 
   load-graph: func(
     model: list<u8>,
+    encoding: graph-encoding,
+    target: execution-target,
+  ) -> result<graph, inference-error>;
+
+  load-preloaded-graph: func(
     encoding: graph-encoding,
     target: execution-target,
   ) -> result<graph, inference-error>;
@@ -114,5 +120,5 @@ world edge-guest {
   import diagnostics;
   import log;
 
-  export run: func(model: list<u8>) -> result<_, inference.inference-error>;
+  export run: func() -> result<_, inference.inference-error>;
 }

@@ -56,6 +56,21 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn initOwnedFloat32(
+        allocator: std.mem.Allocator,
+        shape: []usize,
+        data: []f32,
+    ) !Tensor {
+        _ = allocator;
+        try validateElementCount(shape, data.len);
+
+        return .{
+            .dtype = .float32,
+            .shape = shape,
+            .data = .{ .float32 = data },
+        };
+    }
+
     pub fn initInt64(
         allocator: std.mem.Allocator,
         shape: []const usize,
@@ -73,6 +88,21 @@ pub const Tensor = struct {
             .dtype = .int64,
             .shape = owned_shape,
             .data = .{ .int64 = owned_data },
+        };
+    }
+
+    pub fn initOwnedInt64(
+        allocator: std.mem.Allocator,
+        shape: []usize,
+        data: []i64,
+    ) !Tensor {
+        _ = allocator;
+        try validateElementCount(shape, data.len);
+
+        return .{
+            .dtype = .int64,
+            .shape = shape,
+            .data = .{ .int64 = data },
         };
     }
 
@@ -96,6 +126,21 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn initOwnedInt32(
+        allocator: std.mem.Allocator,
+        shape: []usize,
+        data: []i32,
+    ) !Tensor {
+        _ = allocator;
+        try validateElementCount(shape, data.len);
+
+        return .{
+            .dtype = .int32,
+            .shape = shape,
+            .data = .{ .int32 = data },
+        };
+    }
+
     pub fn initUint8(
         allocator: std.mem.Allocator,
         shape: []const usize,
@@ -116,6 +161,21 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn initOwnedUint8(
+        allocator: std.mem.Allocator,
+        shape: []usize,
+        data: []u8,
+    ) !Tensor {
+        _ = allocator;
+        try validateElementCount(shape, data.len);
+
+        return .{
+            .dtype = .uint8,
+            .shape = shape,
+            .data = .{ .uint8 = data },
+        };
+    }
+
     pub fn initBool(
         allocator: std.mem.Allocator,
         shape: []const usize,
@@ -133,6 +193,21 @@ pub const Tensor = struct {
             .dtype = .bool,
             .shape = owned_shape,
             .data = .{ .bool = owned_data },
+        };
+    }
+
+    pub fn initOwnedBool(
+        allocator: std.mem.Allocator,
+        shape: []usize,
+        data: []bool,
+    ) !Tensor {
+        _ = allocator;
+        try validateElementCount(shape, data.len);
+
+        return .{
+            .dtype = .bool,
+            .shape = shape,
+            .data = .{ .bool = data },
         };
     }
 

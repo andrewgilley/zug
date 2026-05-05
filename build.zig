@@ -32,6 +32,38 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_exe.step);
 
+    const bench_mobilenet = b.addRunArtifact(exe);
+    bench_mobilenet.addArgs(&.{
+        "bench",
+        "models/mobilenetv2-12.onnx",
+        "--input",
+        "input=tmp/mobilenetv2-zero.f32",
+        "--warmup",
+        "1",
+        "--iterations",
+        "3",
+    });
+
+    const bench_mobilenet_step = b.step("bench-mobilenet", "Benchmark MobileNetV2 ONNX execution");
+    bench_mobilenet_step.dependOn(&bench_mobilenet.step);
+
+    const bench_mobilenet_json = b.addRunArtifact(exe);
+    bench_mobilenet_json.addArgs(&.{
+        "bench",
+        "models/mobilenetv2-12.onnx",
+        "--input",
+        "input=tmp/mobilenetv2-zero.f32",
+        "--warmup",
+        "1",
+        "--iterations",
+        "3",
+        "--format",
+        "json",
+    });
+
+    const bench_mobilenet_json_step = b.step("bench-mobilenet-json", "Benchmark MobileNetV2 ONNX execution as JSON");
+    bench_mobilenet_json_step.dependOn(&bench_mobilenet_json.step);
+
     const wasi_nn_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/wasi_nn.zig"),
@@ -52,6 +84,44 @@ pub fn build(b: *std.Build) void {
 
     wasi_nn_abi_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
 
+    const session_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/session.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    session_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
+    const benchmark_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const check_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    check_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
+    const scope_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/scope.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    scope_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
     const wasi_nn_abi_module = b.createModule(.{
         .root_source_file = b.path("src/wasi_nn_abi.zig"),
         .target = target,
@@ -62,23 +132,42 @@ pub fn build(b: *std.Build) void {
 
     const wasm_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/wasm/runtime.zig"),
+            .root_source_file = b.path("src/wasm_tests.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
 
     wasm_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
-    wasm_tests.root_module.addImport("wasi_nn_abi", wasi_nn_abi_module);
+
+    const deployment_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/deployment_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    deployment_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
 
     const run_wasi_nn_tests = b.addRunArtifact(wasi_nn_tests);
     const run_wasi_nn_abi_tests = b.addRunArtifact(wasi_nn_abi_tests);
+    const run_session_tests = b.addRunArtifact(session_tests);
+    const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
+    const run_check_tests = b.addRunArtifact(check_tests);
+    const run_scope_tests = b.addRunArtifact(scope_tests);
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    const run_deployment_tests = b.addRunArtifact(deployment_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_wasi_nn_tests.step);
     test_step.dependOn(&run_wasi_nn_abi_tests.step);
+    test_step.dependOn(&run_session_tests.step);
+    test_step.dependOn(&run_benchmark_tests.step);
+    test_step.dependOn(&run_check_tests.step);
+    test_step.dependOn(&run_scope_tests.step);
     test_step.dependOn(&run_wasm_tests.step);
+    test_step.dependOn(&run_deployment_tests.step);
 
     const test_wasi_nn_step = b.step("test-wasi-nn", "Run WASI-NN tests");
     test_wasi_nn_step.dependOn(&run_wasi_nn_tests.step);
@@ -89,6 +178,101 @@ pub fn build(b: *std.Build) void {
 
     const test_wasm_step = b.step("test-wasm", "Run WASM runtime skeleton tests");
     test_wasm_step.dependOn(&run_wasm_tests.step);
+
+    const test_deployment_step = b.step("test-deployment", "Run edge deployment environment tests");
+    test_deployment_step.dependOn(&run_deployment_tests.step);
+
+    const guest_basic = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/basic.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/basic.wasm",
+    });
+
+    const guest_step = b.step("guest-basic", "Build the basic external wasm guest");
+    guest_step.dependOn(&guest_basic.step);
+
+    const guest_wasi_log = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/wasi_log.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/wasi_log.wasm",
+    });
+
+    const guest_wasi_log_step = b.step("guest-wasi-log", "Build the WASI fd_write external wasm guest");
+    guest_wasi_log_step.dependOn(&guest_wasi_log.step);
+
+    const guest_wasi_nn_smoke = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/wasi_nn_smoke.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/wasi_nn_smoke.wasm",
+    });
+
+    const guest_wasi_nn_smoke_step = b.step("guest-wasi-nn-smoke", "Build the WASI-NN external wasm smoke guest");
+    guest_wasi_nn_smoke_step.dependOn(&guest_wasi_nn_smoke.step);
+
+    const guest_wasi_nn_full = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/wasi_nn_full.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/wasi_nn_full.wasm",
+    });
+
+    const guest_wasi_nn_full_step = b.step("guest-wasi-nn-full", "Build the full WASI-NN external wasm guest");
+    guest_wasi_nn_full_step.dependOn(&guest_wasi_nn_full.step);
+
+    const guests_step = b.step("guests", "Build all external wasm guest fixtures");
+    guests_step.dependOn(&guest_basic.step);
+    guests_step.dependOn(&guest_wasi_log.step);
+    guests_step.dependOn(&guest_wasi_nn_smoke.step);
+    guests_step.dependOn(&guest_wasi_nn_full.step);
+
+    const run_basic_guest = b.addRunArtifact(exe);
+    run_basic_guest.addArgs(&.{ "wasm", "zig-out/basic.wasm", "--arg", "7" });
+    run_basic_guest.step.dependOn(&guest_basic.step);
+
+    const run_wasi_log_guest = b.addRunArtifact(exe);
+    run_wasi_log_guest.addArgs(&.{ "wasm", "zig-out/wasi_log.wasm" });
+    run_wasi_log_guest.step.dependOn(&guest_wasi_log.step);
+
+    const run_wasi_nn_smoke_guest = b.addRunArtifact(exe);
+    run_wasi_nn_smoke_guest.addArgs(&.{ "wasm", "zig-out/wasi_nn_smoke.wasm" });
+    run_wasi_nn_smoke_guest.step.dependOn(&guest_wasi_nn_smoke.step);
+
+    const run_wasi_nn_full_guest = b.addRunArtifact(exe);
+    run_wasi_nn_full_guest.addArgs(&.{ "wasm", "zig-out/wasi_nn_full.wasm", "--manifest", "guests/wasi_nn_full.zugmanifest", "--model", "models/tiny_mnist.onnx" });
+    run_wasi_nn_full_guest.step.dependOn(&guest_wasi_nn_full.step);
+
+    const test_external_wasm_step = b.step("test-external-wasm", "Build and run external wasm guests through zug");
+    test_external_wasm_step.dependOn(&run_basic_guest.step);
+    test_external_wasm_step.dependOn(&run_wasi_log_guest.step);
+    test_external_wasm_step.dependOn(&run_wasi_nn_smoke_guest.step);
+    test_external_wasm_step.dependOn(&run_wasi_nn_full_guest.step);
 
     const gen_proto = b.step("gen-proto", "generates zig files from protobuf definitions");
 

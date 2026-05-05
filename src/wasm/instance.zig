@@ -1,7 +1,7 @@
 const std = @import("std");
 const imports = @import("imports.zig");
 const module = @import("module.zig");
-const wasi_nn_abi = @import("wasi_nn_abi");
+const wasi_nn_abi = @import("../wasi_nn_abi.zig");
 
 const wasm_page_size = 64 * 1024;
 const max_wasm_pages = 65536;
@@ -9,6 +9,10 @@ const max_wasm_pages = 65536;
 pub const RuntimeGlobal = struct {
     global_type: module.GlobalType,
     value: module.ConstValue,
+};
+
+pub const RuntimeTable = struct {
+    elements: []?u32,
 };
 
 pub const Instance = struct {
@@ -19,6 +23,7 @@ pub const Instance = struct {
     import_resolver: ?*imports.Resolver = null,
     imported_functions: []imports.Function = &.{},
     globals: []RuntimeGlobal = &.{},
+    tables: []RuntimeTable = &.{},
     start_executed: bool = false,
 
     pub fn init(
@@ -44,6 +49,7 @@ pub const Instance = struct {
         errdefer result.deinit();
 
         try result.initGlobals();
+        try result.initTables();
         try result.applyDataSegments();
 
         return result;
@@ -55,6 +61,14 @@ pub const Instance = struct {
         }
         if (self.globals.len != 0) {
             self.allocator.free(self.globals);
+        }
+        for (self.tables) |table| {
+            if (table.elements.len != 0) {
+                self.allocator.free(table.elements);
+            }
+        }
+        if (self.tables.len != 0) {
+            self.allocator.free(self.tables);
         }
         self.allocator.free(self.memory_bytes);
         self.* = undefined;
@@ -108,20 +122,33 @@ pub const Instance = struct {
     }
 
     pub fn importedFunctionType(self: *const Instance, function_index: u32) !module.FunctionType {
+        return self.functionType(try self.functionTypeIndex(function_index));
+    }
+
+    pub fn functionTypeIndex(self: *const Instance, function_index: u32) !u32 {
         const actual = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
-        var current: usize = 0;
+        const imported_count = self.importedFunctionCount();
 
-        for (self.module.imports.items) |import| {
-            if (import.kind != .function) continue;
+        if (actual < imported_count) {
+            var current: usize = 0;
 
-            if (current == actual) {
-                return self.functionType(import.type_index orelse return error.MissingImportTypeIndex);
+            for (self.module.imports.items) |import| {
+                if (import.kind != .function) continue;
+
+                if (current == actual) {
+                    return import.type_index orelse return error.MissingImportTypeIndex;
+                }
+
+                current += 1;
             }
 
-            current += 1;
+            return error.InvalidFunctionIndex;
         }
 
-        return error.InvalidFunctionIndex;
+        const defined_index = actual - imported_count;
+        if (defined_index >= self.module.functions.items.len) return error.InvalidFunctionIndex;
+
+        return self.module.functions.items[defined_index].type_index;
     }
 
     pub fn exportedFunctionIndex(self: *const Instance, name: []const u8) !u32 {
@@ -152,6 +179,30 @@ pub const Instance = struct {
         }
 
         return count;
+    }
+
+    pub fn importedTableCount(self: *const Instance) usize {
+        var count: usize = 0;
+
+        for (self.module.imports.items) |import| {
+            if (import.kind == .table) count += 1;
+        }
+
+        return count;
+    }
+
+    pub fn functionCount(self: *const Instance) usize {
+        return self.importedFunctionCount() + self.module.functions.items.len;
+    }
+
+    pub fn tableFunctionIndex(self: *const Instance, table_index: u32, element_index: u32) !u32 {
+        const actual_table = std.math.cast(usize, table_index) orelse return error.InvalidTableIndex;
+        if (actual_table >= self.tables.len) return error.InvalidTableIndex;
+
+        const actual_element = std.math.cast(usize, element_index) orelse return error.InvalidTableElementIndex;
+        if (actual_element >= self.tables[actual_table].elements.len) return error.InvalidTableElementIndex;
+
+        return self.tables[actual_table].elements[actual_element] orelse error.UninitializedTableElement;
     }
 
     pub fn global(self: *const Instance, index: u32) !RuntimeGlobal {
@@ -229,6 +280,49 @@ pub const Instance = struct {
         }
 
         self.globals = globals;
+    }
+
+    fn initTables(self: *Instance) !void {
+        if (self.importedTableCount() != 0) return error.ImportedTablesUnsupported;
+        if (self.module.tables.items.len == 0) {
+            if (self.module.element_segments.items.len != 0) return error.MissingTable;
+            return;
+        }
+
+        const tables = try self.allocator.alloc(RuntimeTable, self.module.tables.items.len);
+        for (tables) |*table| {
+            table.* = .{ .elements = &.{} };
+        }
+        self.tables = tables;
+
+        for (self.module.tables.items, 0..) |table_def, index| {
+            const len = std.math.cast(usize, table_def.limits.min) orelse return error.TableTooLarge;
+            const elements = try self.allocator.alloc(?u32, len);
+            for (elements) |*element| {
+                element.* = null;
+            }
+            self.tables[index].elements = elements;
+        }
+
+        try self.applyElementSegments();
+    }
+
+    fn applyElementSegments(self: *Instance) !void {
+        for (self.module.element_segments.items) |segment| {
+            const actual_table = std.math.cast(usize, segment.table_index) orelse return error.InvalidTableIndex;
+            if (actual_table >= self.tables.len) return error.InvalidTableIndex;
+
+            const start = std.math.cast(usize, segment.offset) orelse return error.InvalidTableElementIndex;
+            const end = try std.math.add(usize, start, segment.function_indices.len);
+            if (end > self.tables[actual_table].elements.len) return error.InvalidTableElementIndex;
+
+            for (segment.function_indices, 0..) |function_index, index| {
+                const actual_function = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
+                if (actual_function >= self.functionCount()) return error.InvalidFunctionIndex;
+
+                self.tables[actual_table].elements[start + index] = function_index;
+            }
+        }
     }
 
     fn memoryMaxPages(self: *const Instance) !u32 {
@@ -373,4 +467,19 @@ test "instance initializes and mutates defined globals" {
         .i32 => |value| value,
         else => return error.ExpectedI32Global,
     });
+}
+
+test "instance initializes active table element segments" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, @import("fixtures.zig").indirect_function_call);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), wasm_instance.tables.len);
+    try std.testing.expectEqual(@as(usize, 2), wasm_instance.tables[0].elements.len);
+    try std.testing.expectEqual(@as(u32, 0), try wasm_instance.tableFunctionIndex(0, 0));
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.tableFunctionIndex(0, 1));
 }

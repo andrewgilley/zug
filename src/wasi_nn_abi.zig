@@ -21,6 +21,7 @@ pub const Status = enum(u32) {
     buffer_too_small = 11,
     model_too_large = 12,
     runtime_error = 13,
+    missing_model = 14,
 };
 
 pub const GraphEncoding = enum(u32) {
@@ -72,7 +73,7 @@ pub const LinearMemory = struct {
         writeU64Little(bytes, value);
     }
 
-    fn writeSlice(self: *LinearMemory, ptr: u32, len: u32) ![]u8 {
+    pub fn writeSlice(self: *LinearMemory, ptr: u32, len: u32) ![]u8 {
         const range = try checkedRange(self.bytes.len, ptr, len);
         return self.bytes[range.start..range.end];
     }
@@ -82,6 +83,7 @@ pub const Surface = struct {
     allocator: std.mem.Allocator,
     host: *wasi_nn.Host,
     memory: *LinearMemory,
+    preloaded_model: ?[]const u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -95,6 +97,10 @@ pub const Surface = struct {
         };
     }
 
+    pub fn setPreloadedModel(self: *Surface, model_bytes: ?[]const u8) void {
+        self.preloaded_model = model_bytes;
+    }
+
     pub fn loadGraph(
         self: *Surface,
         model_ptr: u32,
@@ -103,9 +109,31 @@ pub const Surface = struct {
         target_code: u32,
         out_graph_handle_ptr: u32,
     ) Status {
+        const model_bytes = self.memory.read(model_ptr, model_len) catch return .invalid_memory;
+
+        return self.loadGraphBytes(model_bytes, encoding_code, target_code, out_graph_handle_ptr);
+    }
+
+    pub fn loadPreloadedGraph(
+        self: *Surface,
+        encoding_code: u32,
+        target_code: u32,
+        out_graph_handle_ptr: u32,
+    ) Status {
+        const model_bytes = self.preloaded_model orelse return .missing_model;
+
+        return self.loadGraphBytes(model_bytes, encoding_code, target_code, out_graph_handle_ptr);
+    }
+
+    fn loadGraphBytes(
+        self: *Surface,
+        model_bytes: []const u8,
+        encoding_code: u32,
+        target_code: u32,
+        out_graph_handle_ptr: u32,
+    ) Status {
         const encoding = decodeGraphEncoding(encoding_code) catch return .invalid_encoding;
         const target = decodeExecutionTarget(target_code) catch return .invalid_target;
-        const model_bytes = self.memory.read(model_ptr, model_len) catch return .invalid_memory;
 
         const handle = self.host.loadGraph(encoding, target, model_bytes) catch |err| {
             return statusFromError(err);
@@ -327,8 +355,11 @@ fn tensorFromFloat32Bytes(
     const expected_len = try std.math.mul(usize, count, @sizeOf(f32));
     if (data_bytes.len != expected_len) return error.InvalidTensorData;
 
+    const owned_shape = try allocator.dupe(usize, shape);
+    errdefer allocator.free(owned_shape);
+
     const data = try allocator.alloc(f32, count);
-    defer allocator.free(data);
+    errdefer allocator.free(data);
 
     for (data, 0..) |*value, index| {
         const offset = index * @sizeOf(f32);
@@ -336,7 +367,7 @@ fn tensorFromFloat32Bytes(
         value.* = @bitCast(bits);
     }
 
-    return tensor.Tensor.initFloat32(allocator, shape, data);
+    return tensor.Tensor.initOwnedFloat32(allocator, owned_shape, data);
 }
 
 fn tensorByteLen(dtype: tensor.DType, shape: []const usize) !u32 {
@@ -574,4 +605,45 @@ test "abi drives wasi-nn host through linear memory" {
         const value: f32 = @bitCast(readU32Little(output_bytes[offset..][0..4]));
         try std.testing.expectApproxEqAbs(@as(f32, 0.1), value, 0.00001);
     }
+}
+
+test "abi loads a host preloaded model without guest model bytes" {
+    const allocator = std.testing.allocator;
+
+    const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        "models/tiny_mnist.onnx",
+        allocator,
+        .limited(max_model_bytes),
+    );
+    defer allocator.free(model_bytes);
+
+    var memory_bytes = [_]u8{0} ** 64;
+    var memory = LinearMemory.init(&memory_bytes);
+    var host = wasi_nn.Host.init(allocator);
+    defer host.deinit();
+
+    var surface = Surface.init(allocator, &host, &memory);
+    const graph_handle_ptr: u32 = 16;
+
+    try std.testing.expectEqual(
+        Status.missing_model,
+        surface.loadPreloadedGraph(
+            @intFromEnum(GraphEncoding.onnx),
+            @intFromEnum(ExecutionTarget.cpu),
+            graph_handle_ptr,
+        ),
+    );
+
+    surface.setPreloadedModel(model_bytes);
+
+    try std.testing.expectEqual(
+        Status.ok,
+        surface.loadPreloadedGraph(
+            @intFromEnum(GraphEncoding.onnx),
+            @intFromEnum(ExecutionTarget.cpu),
+            graph_handle_ptr,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 0), try memory.readU32(graph_handle_ptr));
 }

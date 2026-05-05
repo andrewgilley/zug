@@ -24,6 +24,12 @@ const BlockBoundary = struct {
     end_offset: usize,
 };
 
+const MemoryRange = struct {
+    start: usize,
+    end: usize,
+    len: usize,
+};
+
 pub const Interpreter = struct {
     instance: *instance.Instance,
 
@@ -45,7 +51,7 @@ pub const Interpreter = struct {
     pub fn callImport(
         self: *Interpreter,
         function: imports.Function,
-        args: []const u32,
+        args: []const imports.Arg,
     ) !u32 {
         const resolver = self.instance.import_resolver orelse return error.MissingImportResolver;
         return resolver.call(function, args);
@@ -172,6 +178,11 @@ pub const Interpreter = struct {
                 0x10 => {
                     const target_index = try reader.readVarU32();
                     try self.callFunctionFromStack(target_index, stack, depth + 1);
+                },
+                0x11 => {
+                    const type_index = try reader.readVarU32();
+                    const table_index = try reader.readVarU32();
+                    try self.callIndirectFromStack(type_index, table_index, stack, depth + 1);
                 },
                 0x1a => _ = try popValue(stack),
                 0x1b => try pushSelectedValue(self.instance.allocator, stack),
@@ -676,6 +687,34 @@ pub const Interpreter = struct {
                     const value = try valueAsI64(try popValue(stack));
                     try stack.append(self.instance.allocator, .{ .i64 = rotr64(value, shift) });
                 },
+                0x8b => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @abs(value) });
+                },
+                0x8c => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = -value });
+                },
+                0x8d => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @ceil(value) });
+                },
+                0x8e => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floor(value) });
+                },
+                0x8f => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @trunc(value) });
+                },
+                0x90 => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = nearestF32(value) });
+                },
+                0x91 => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @sqrt(value) });
+                },
                 0x92 => {
                     const rhs = try valueAsF32(try popValue(stack));
                     const lhs = try valueAsF32(try popValue(stack));
@@ -696,6 +735,49 @@ pub const Interpreter = struct {
                     const lhs = try valueAsF32(try popValue(stack));
                     try stack.append(self.instance.allocator, .{ .f32 = lhs / rhs });
                 },
+                0x96 => {
+                    const rhs = try valueAsF32(try popValue(stack));
+                    const lhs = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = wasmMinF32(lhs, rhs) });
+                },
+                0x97 => {
+                    const rhs = try valueAsF32(try popValue(stack));
+                    const lhs = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = wasmMaxF32(lhs, rhs) });
+                },
+                0x98 => {
+                    const rhs = try valueAsF32(try popValue(stack));
+                    const lhs = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = copysignF32(lhs, rhs) });
+                },
+                0x99 => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @abs(value) });
+                },
+                0x9a => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = -value });
+                },
+                0x9b => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @ceil(value) });
+                },
+                0x9c => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @floor(value) });
+                },
+                0x9d => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @trunc(value) });
+                },
+                0x9e => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = nearestF64(value) });
+                },
+                0x9f => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @sqrt(value) });
+                },
                 0xa0 => {
                     const rhs = try valueAsF64(try popValue(stack));
                     const lhs = try valueAsF64(try popValue(stack));
@@ -715,6 +797,122 @@ pub const Interpreter = struct {
                     const rhs = try valueAsF64(try popValue(stack));
                     const lhs = try valueAsF64(try popValue(stack));
                     try stack.append(self.instance.allocator, .{ .f64 = lhs / rhs });
+                },
+                0xa4 => {
+                    const rhs = try valueAsF64(try popValue(stack));
+                    const lhs = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = wasmMinF64(lhs, rhs) });
+                },
+                0xa5 => {
+                    const rhs = try valueAsF64(try popValue(stack));
+                    const lhs = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = wasmMaxF64(lhs, rhs) });
+                },
+                0xa6 => {
+                    const rhs = try valueAsF64(try popValue(stack));
+                    const lhs = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = copysignF64(lhs, rhs) });
+                },
+                0xa7 => {
+                    const value = try valueAsI64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = @truncate(value) });
+                },
+                0xa8 => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = try truncF32ToI32S(value) });
+                },
+                0xa9 => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = try truncF32ToI32U(value) });
+                },
+                0xaa => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = try truncF64ToI32S(value) });
+                },
+                0xab => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = try truncF64ToI32U(value) });
+                },
+                0xac => {
+                    const value: i32 = @bitCast(try valueAsI32(try popValue(stack)));
+                    const widened: i64 = value;
+                    try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
+                },
+                0xad => {
+                    const value = try valueAsI32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = value });
+                },
+                0xae => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = try truncF32ToI64S(value) });
+                },
+                0xaf => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = try truncF32ToI64U(value) });
+                },
+                0xb0 => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = try truncF64ToI64S(value) });
+                },
+                0xb1 => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = try truncF64ToI64U(value) });
+                },
+                0xb2 => {
+                    const value: i32 = @bitCast(try valueAsI32(try popValue(stack)));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floatFromInt(value) });
+                },
+                0xb3 => {
+                    const value = try valueAsI32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floatFromInt(value) });
+                },
+                0xb4 => {
+                    const value: i64 = @bitCast(try valueAsI64(try popValue(stack)));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floatFromInt(value) });
+                },
+                0xb5 => {
+                    const value = try valueAsI64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floatFromInt(value) });
+                },
+                0xb6 => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @floatCast(value) });
+                },
+                0xb7 => {
+                    const value: i32 = @bitCast(try valueAsI32(try popValue(stack)));
+                    try stack.append(self.instance.allocator, .{ .f64 = @floatFromInt(value) });
+                },
+                0xb8 => {
+                    const value = try valueAsI32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @floatFromInt(value) });
+                },
+                0xb9 => {
+                    const value: i64 = @bitCast(try valueAsI64(try popValue(stack)));
+                    try stack.append(self.instance.allocator, .{ .f64 = @floatFromInt(value) });
+                },
+                0xba => {
+                    const value = try valueAsI64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @floatFromInt(value) });
+                },
+                0xbb => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = value });
+                },
+                0xbc => {
+                    const value = try valueAsF32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i32 = @bitCast(value) });
+                },
+                0xbd => {
+                    const value = try valueAsF64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .i64 = @bitCast(value) });
+                },
+                0xbe => {
+                    const value = try valueAsI32(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f32 = @bitCast(value) });
+                },
+                0xbf => {
+                    const value = try valueAsI64(try popValue(stack));
+                    try stack.append(self.instance.allocator, .{ .f64 = @bitCast(value) });
                 },
                 0xc0 => {
                     const value = try valueAsI32(try popValue(stack));
@@ -746,11 +944,108 @@ pub const Interpreter = struct {
                     const widened: i64 = narrowed;
                     try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
                 },
+                0xfc => try self.executePrefixedInstruction(reader, stack),
                 else => return error.UnsupportedWasmOpcode,
             }
         }
 
         return .done;
+    }
+
+    fn executePrefixedInstruction(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const subopcode = try reader.readVarU32();
+
+        switch (subopcode) {
+            0x00 => {
+                const value = try valueAsF32(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i32 = truncSatF32ToI32S(value) });
+            },
+            0x01 => {
+                const value = try valueAsF32(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i32 = truncSatF32ToI32U(value) });
+            },
+            0x02 => {
+                const value = try valueAsF64(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i32 = truncSatF64ToI32S(value) });
+            },
+            0x03 => {
+                const value = try valueAsF64(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i32 = truncSatF64ToI32U(value) });
+            },
+            0x04 => {
+                const value = try valueAsF32(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i64 = truncSatF32ToI64S(value) });
+            },
+            0x05 => {
+                const value = try valueAsF32(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i64 = truncSatF32ToI64U(value) });
+            },
+            0x06 => {
+                const value = try valueAsF64(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i64 = truncSatF64ToI64S(value) });
+            },
+            0x07 => {
+                const value = try valueAsF64(try popValue(stack));
+                try stack.append(self.instance.allocator, .{ .i64 = truncSatF64ToI64U(value) });
+            },
+            0x0a => try self.executeMemoryCopy(reader, stack),
+            0x0b => try self.executeMemoryFill(reader, stack),
+            else => return error.UnsupportedWasmOpcode,
+        }
+    }
+
+    fn executeMemoryCopy(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const destination_memory_index = try reader.readByte();
+        const source_memory_index = try reader.readByte();
+        if (destination_memory_index != 0 or source_memory_index != 0) return error.UnsupportedMemoryIndex;
+
+        const len = try valueAsI32(try popValue(stack));
+        const source = try valueAsI32(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        if (len == 0) return;
+
+        const source_range = try checkedMemoryRange(self.instance.memory_bytes.len, source, len);
+        const destination_range = try checkedMemoryRange(self.instance.memory_bytes.len, destination, len);
+
+        if (destination_range.start <= source_range.start) {
+            var index: usize = 0;
+            while (index < source_range.len) : (index += 1) {
+                self.instance.memory_bytes[destination_range.start + index] =
+                    self.instance.memory_bytes[source_range.start + index];
+            }
+        } else {
+            var index = source_range.len;
+            while (index > 0) {
+                index -= 1;
+                self.instance.memory_bytes[destination_range.start + index] =
+                    self.instance.memory_bytes[source_range.start + index];
+            }
+        }
+    }
+
+    fn executeMemoryFill(
+        self: *Interpreter,
+        reader: *binary.Reader,
+        stack: *std.ArrayList(Value),
+    ) !void {
+        const memory_index = try reader.readByte();
+        if (memory_index != 0) return error.UnsupportedMemoryIndex;
+
+        const len = try valueAsI32(try popValue(stack));
+        const value = try valueAsI32(try popValue(stack));
+        const destination = try valueAsI32(try popValue(stack));
+
+        const range = try checkedMemoryRange(self.instance.memory_bytes.len, destination, len);
+        @memset(self.instance.memory_bytes[range.start..range.end], std.math.cast(u8, value & 0xff) orelse unreachable);
     }
 
     fn executeBlock(
@@ -889,17 +1184,34 @@ pub const Interpreter = struct {
         }
     }
 
+    fn callIndirectFromStack(
+        self: *Interpreter,
+        type_index: u32,
+        table_index: u32,
+        stack: *std.ArrayList(Value),
+        depth: usize,
+    ) !void {
+        const element_index = try valueAsI32(try popValue(stack));
+        const function_index = try self.instance.tableFunctionIndex(table_index, element_index);
+
+        const expected_type = try self.instance.functionType(type_index);
+        const actual_type = try self.instance.functionType(try self.instance.functionTypeIndex(function_index));
+        if (!functionTypesEqual(expected_type, actual_type)) return error.IndirectCallTypeMismatch;
+
+        try self.callFunctionFromStack(function_index, stack, depth);
+    }
+
     fn callImportWithValues(
         self: *Interpreter,
         function: imports.Function,
         args: []const Value,
     ) !u32 {
-        var args_buffer: [7]u32 = undefined;
+        var args_buffer: [7]imports.Arg = undefined;
 
         if (args.len > args_buffer.len) return error.UnsupportedImportArity;
 
         for (args, 0..) |arg, index| {
-            args_buffer[index] = try valueAsI32(arg);
+            args_buffer[index] = argFromValue(arg);
         }
 
         return self.callImport(function, args_buffer[0..args.len]);
@@ -949,6 +1261,11 @@ fn validateFunctionResult(function_type: module.FunctionType, result: ?Value) !v
     if (!valueMatchesType(actual, function_type.results[0])) return error.FunctionResultTypeMismatch;
 }
 
+fn functionTypesEqual(lhs: module.FunctionType, rhs: module.FunctionType) bool {
+    return std.mem.eql(module.ValueType, lhs.params, rhs.params) and
+        std.mem.eql(module.ValueType, lhs.results, rhs.results);
+}
+
 fn resultFromImport(function_type: module.FunctionType, result: u32) !?Value {
     if (function_type.results.len > 1) return error.UnsupportedMultiValueResult;
     if (function_type.results.len == 0) return null;
@@ -987,6 +1304,15 @@ fn constValueFromValue(value: Value, value_type: module.ValueType) !module.Const
             .f64 => |actual| .{ .f64 = actual },
             else => error.ExpectedF64Value,
         },
+    };
+}
+
+fn argFromValue(value: Value) imports.Arg {
+    return switch (value) {
+        .i32 => |actual| .{ .i32 = actual },
+        .i64 => |actual| .{ .i64 = actual },
+        .f32 => |actual| .{ .f32 = actual },
+        .f64 => |actual| .{ .f64 = actual },
     };
 }
 
@@ -1131,6 +1457,25 @@ fn skipInstructionImmediate(reader: *binary.Reader, opcode: u8) !void {
         0x42 => _ = try reader.readVarI64(),
         0x43 => _ = try reader.readBytes(4),
         0x44 => _ = try reader.readBytes(8),
+        0xfc => try skipPrefixedInstructionImmediate(reader),
+        else => return error.UnsupportedWasmOpcode,
+    }
+}
+
+fn skipPrefixedInstructionImmediate(reader: *binary.Reader) !void {
+    const subopcode = try reader.readVarU32();
+
+    switch (subopcode) {
+        0x00...0x07 => {},
+        0x0a => {
+            const destination_memory_index = try reader.readByte();
+            const source_memory_index = try reader.readByte();
+            if (destination_memory_index != 0 or source_memory_index != 0) return error.UnsupportedMemoryIndex;
+        },
+        0x0b => {
+            const memory_index = try reader.readByte();
+            if (memory_index != 0) return error.UnsupportedMemoryIndex;
+        },
         else => return error.UnsupportedWasmOpcode,
     }
 }
@@ -1184,6 +1529,251 @@ fn valueAsF64(value: Value) !f64 {
         .f64 => |actual| actual,
         else => error.ExpectedF64Value,
     };
+}
+
+fn checkedMemoryRange(memory_len: usize, ptr: u32, len: u32) !MemoryRange {
+    const start = std.math.cast(usize, ptr) orelse return error.InvalidMemoryRange;
+    const byte_len = std.math.cast(usize, len) orelse return error.InvalidMemoryRange;
+    const end = try std.math.add(usize, start, byte_len);
+    if (end > memory_len) return error.InvalidMemoryRange;
+
+    return .{
+        .start = start,
+        .end = end,
+        .len = byte_len,
+    };
+}
+
+fn nearestF32(value: f32) f32 {
+    if (value == 0 or !isFiniteF32(value)) return value;
+
+    const lower = @floor(value);
+    const upper = @ceil(value);
+    const lower_distance = value - lower;
+    const upper_distance = upper - value;
+
+    if (lower_distance < upper_distance) return lower;
+    if (upper_distance < lower_distance) return upper;
+    return if (isEvenFloatIntegerF32(lower)) lower else upper;
+}
+
+fn nearestF64(value: f64) f64 {
+    if (value == 0 or !isFiniteF64(value)) return value;
+
+    const lower = @floor(value);
+    const upper = @ceil(value);
+    const lower_distance = value - lower;
+    const upper_distance = upper - value;
+
+    if (lower_distance < upper_distance) return lower;
+    if (upper_distance < lower_distance) return upper;
+    return if (isEvenFloatIntegerF64(lower)) lower else upper;
+}
+
+fn wasmMinF32(lhs: f32, rhs: f32) f32 {
+    if (isNanF32(lhs)) return lhs;
+    if (isNanF32(rhs)) return rhs;
+    if (lhs == 0 and rhs == 0) {
+        const bits = (@as(u32, @bitCast(lhs)) | @as(u32, @bitCast(rhs))) & 0x80000000;
+        return @bitCast(bits);
+    }
+    return if (lhs < rhs) lhs else rhs;
+}
+
+fn wasmMaxF32(lhs: f32, rhs: f32) f32 {
+    if (isNanF32(lhs)) return lhs;
+    if (isNanF32(rhs)) return rhs;
+    if (lhs == 0 and rhs == 0) {
+        const bits = (@as(u32, @bitCast(lhs)) & @as(u32, @bitCast(rhs))) & 0x80000000;
+        return @bitCast(bits);
+    }
+    return if (lhs > rhs) lhs else rhs;
+}
+
+fn wasmMinF64(lhs: f64, rhs: f64) f64 {
+    if (isNanF64(lhs)) return lhs;
+    if (isNanF64(rhs)) return rhs;
+    if (lhs == 0 and rhs == 0) {
+        const bits = (@as(u64, @bitCast(lhs)) | @as(u64, @bitCast(rhs))) & 0x8000000000000000;
+        return @bitCast(bits);
+    }
+    return if (lhs < rhs) lhs else rhs;
+}
+
+fn wasmMaxF64(lhs: f64, rhs: f64) f64 {
+    if (isNanF64(lhs)) return lhs;
+    if (isNanF64(rhs)) return rhs;
+    if (lhs == 0 and rhs == 0) {
+        const bits = (@as(u64, @bitCast(lhs)) & @as(u64, @bitCast(rhs))) & 0x8000000000000000;
+        return @bitCast(bits);
+    }
+    return if (lhs > rhs) lhs else rhs;
+}
+
+fn copysignF32(lhs: f32, rhs: f32) f32 {
+    const magnitude = @as(u32, @bitCast(lhs)) & 0x7fffffff;
+    const sign = @as(u32, @bitCast(rhs)) & 0x80000000;
+    return @bitCast(magnitude | sign);
+}
+
+fn copysignF64(lhs: f64, rhs: f64) f64 {
+    const magnitude = @as(u64, @bitCast(lhs)) & 0x7fffffffffffffff;
+    const sign = @as(u64, @bitCast(rhs)) & 0x8000000000000000;
+    return @bitCast(magnitude | sign);
+}
+
+fn truncF32ToI32S(value: f32) !u32 {
+    if (!isFiniteF32(value) or value < -2147483648.0 or value >= 2147483648.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    const converted: i32 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncF32ToI32U(value: f32) !u32 {
+    if (!isFiniteF32(value) or value < 0 or value >= 4294967296.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    return @intFromFloat(value);
+}
+
+fn truncF64ToI32S(value: f64) !u32 {
+    if (!isFiniteF64(value) or value < -2147483648.0 or value >= 2147483648.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    const converted: i32 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncF64ToI32U(value: f64) !u32 {
+    if (!isFiniteF64(value) or value < 0 or value >= 4294967296.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    return @intFromFloat(value);
+}
+
+fn truncF32ToI64S(value: f32) !u64 {
+    if (!isFiniteF32(value) or value < -9223372036854775808.0 or value >= 9223372036854775808.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    const converted: i64 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncF32ToI64U(value: f32) !u64 {
+    if (!isFiniteF32(value) or value < 0 or value >= 18446744073709551616.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    return @intFromFloat(value);
+}
+
+fn truncF64ToI64S(value: f64) !u64 {
+    if (!isFiniteF64(value) or value < -9223372036854775808.0 or value >= 9223372036854775808.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    const converted: i64 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncF64ToI64U(value: f64) !u64 {
+    if (!isFiniteF64(value) or value < 0 or value >= 18446744073709551616.0) {
+        return error.InvalidFloatToIntegerConversion;
+    }
+    return @intFromFloat(value);
+}
+
+fn truncSatF32ToI32S(value: f32) u32 {
+    if (isNanF32(value)) return 0;
+    if (value <= -2147483648.0) return @bitCast(@as(i32, std.math.minInt(i32)));
+    if (value >= 2147483647.0) return @intCast(std.math.maxInt(i32));
+
+    const converted: i32 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncSatF32ToI32U(value: f32) u32 {
+    if (isNanF32(value) or value <= 0) return 0;
+    if (value >= 4294967295.0) return std.math.maxInt(u32);
+
+    return @intFromFloat(value);
+}
+
+fn truncSatF64ToI32S(value: f64) u32 {
+    if (isNanF64(value)) return 0;
+    if (value <= -2147483648.0) return @bitCast(@as(i32, std.math.minInt(i32)));
+    if (value >= 2147483647.0) return @intCast(std.math.maxInt(i32));
+
+    const converted: i32 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncSatF64ToI32U(value: f64) u32 {
+    if (isNanF64(value) or value <= 0) return 0;
+    if (value >= 4294967295.0) return std.math.maxInt(u32);
+
+    return @intFromFloat(value);
+}
+
+fn truncSatF32ToI64S(value: f32) u64 {
+    if (isNanF32(value)) return 0;
+    if (value <= -9223372036854775808.0) return @bitCast(@as(i64, std.math.minInt(i64)));
+    if (value >= 9223372036854775807.0) return @intCast(std.math.maxInt(i64));
+
+    const converted: i64 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncSatF32ToI64U(value: f32) u64 {
+    if (isNanF32(value) or value <= 0) return 0;
+    if (value >= 18446744073709551615.0) return std.math.maxInt(u64);
+
+    return @intFromFloat(value);
+}
+
+fn truncSatF64ToI64S(value: f64) u64 {
+    if (isNanF64(value)) return 0;
+    if (value <= -9223372036854775808.0) return @bitCast(@as(i64, std.math.minInt(i64)));
+    if (value >= 9223372036854775807.0) return @intCast(std.math.maxInt(i64));
+
+    const converted: i64 = @intFromFloat(value);
+    return @bitCast(converted);
+}
+
+fn truncSatF64ToI64U(value: f64) u64 {
+    if (isNanF64(value) or value <= 0) return 0;
+    if (value >= 18446744073709551615.0) return std.math.maxInt(u64);
+
+    return @intFromFloat(value);
+}
+
+fn isFiniteF32(value: f32) bool {
+    const bits: u32 = @bitCast(value);
+    return (bits & 0x7f800000) != 0x7f800000;
+}
+
+fn isFiniteF64(value: f64) bool {
+    const bits: u64 = @bitCast(value);
+    return (bits & 0x7ff0000000000000) != 0x7ff0000000000000;
+}
+
+fn isNanF32(value: f32) bool {
+    const bits: u32 = @bitCast(value);
+    return (bits & 0x7f800000) == 0x7f800000 and (bits & 0x007fffff) != 0;
+}
+
+fn isNanF64(value: f64) bool {
+    const bits: u64 = @bitCast(value);
+    return (bits & 0x7ff0000000000000) == 0x7ff0000000000000 and (bits & 0x000fffffffffffff) != 0;
+}
+
+fn isEvenFloatIntegerF32(value: f32) bool {
+    const half = value / 2.0;
+    return @floor(half) == half;
+}
+
+fn isEvenFloatIntegerF64(value: f64) bool {
+    const half = value / 2.0;
+    return @floor(half) == half;
 }
 
 fn pushI32Comparison(
@@ -1518,6 +2108,21 @@ test "interpreter passes arguments to defined functions" {
     try std.testing.expectEqual(@as(u32, 15), try valueAsI32(result));
 }
 
+test "interpreter calls functions indirectly through a table" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.indirect_function_call);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 12), try valueAsI32(result));
+}
+
 test "interpreter executes extended i32 numeric ops" {
     const allocator = std.testing.allocator;
 
@@ -1577,6 +2182,38 @@ test "interpreter executes i64 and float numeric ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 3), try valueAsI32(result));
+}
+
+test "interpreter executes float conversion ops" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.float_conversion_ops);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 7), try valueAsI32(result));
+}
+
+test "interpreter executes prefixed numeric and memory ops" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.prefixed_numeric_and_memory_ops);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 6), try valueAsI32(result));
+    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(8, 1))[0]);
+    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(11, 1))[0]);
 }
 
 test "interpreter executes extended i64 memory ops" {
@@ -1658,9 +2295,39 @@ test "interpreter routes wasi fd_write import" {
     try std.testing.expectEqualStrings("hello", resolver.stdout.items);
 }
 
+test "interpreter routes wasi system imports" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try module.Module.parse(allocator, fixtures.wasi_system_basics);
+    defer parsed.deinit(allocator);
+
+    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
+    defer wasm_instance.deinit();
+
+    const args = [_][]const u8{ "zug", "edge" };
+    const environ = [_][]const u8{"ZUG=1"};
+    var resolver = imports.Resolver.initWasiConfig(allocator, &wasm_instance.memory, .{
+        .args = &args,
+        .environ = &environ,
+    });
+    defer resolver.deinit();
+    try wasm_instance.bindImports(&resolver);
+
+    var interpreter = Interpreter.init(&wasm_instance);
+    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
+
+    try std.testing.expectEqual(@as(u32, 5), try valueAsI32(result));
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.memory.readU32(0));
+    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory.readU32(4));
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.memory.readU32(8));
+    try std.testing.expectEqual(@as(u32, 6), try wasm_instance.memory.readU32(16));
+    try std.testing.expectEqual(@as(u8, 2), (try wasm_instance.memory.read(40, 1))[0]);
+    try std.testing.expect(readU64Little(try wasm_instance.memory.read(64, 8)) != 0);
+}
+
 test "interpreter routes wasi-nn import calls through ABI resolver" {
     const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("wasi_nn_abi");
+    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
 
     var parsed = try module.Module.parse(allocator, fixtures.wasi_nn_compute_smoke);
     defer parsed.deinit(allocator);
@@ -1686,7 +2353,7 @@ test "interpreter routes wasi-nn import calls through ABI resolver" {
 
 test "interpreter runs tiny mnist wasi-nn flow from guest memory" {
     const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("wasi_nn_abi");
+    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
 
     const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
         std.Options.debug_io,
@@ -1729,7 +2396,7 @@ test "interpreter runs tiny mnist wasi-nn flow from guest memory" {
 
 test "interpreter runs constrained edge inference guest flow" {
     const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("wasi_nn_abi");
+    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
 
     const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
         std.Options.debug_io,

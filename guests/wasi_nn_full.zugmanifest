@@ -1,0 +1,15 @@
+name = wasi-nn-full
+runtime = zug-edge-guest-0.1
+export = run
+requires_model = true
+model_encoding = onnx
+max_model_bytes = 100MiB
+min_memory_bytes = 1MiB
+max_memory_bytes = 16MiB
+requires_import = zug_nn.load_preloaded_graph
+requires_import = wasi_snapshot_preview1.fd_write
+requires_import = wasi_nn.init_execution_context
+requires_import = wasi_nn.set_input_by_index
+requires_import = wasi_nn.compute
+requires_import = wasi_nn.get_output_descriptor
+requires_import = wasi_nn.get_output

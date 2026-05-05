@@ -818,11 +818,11 @@
 2972 1688849862706664 1776120616000000000 8c37c40098d399e3b36a078ce1d4e3a1 1 std\crypto\codecs\asn1\der\ArrayListReverse.zig
 2533 93449692267969063 1777937813334994700 556615cb245a535b35644a1d674df4ca 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\runtime.zig
 6073 44754521297029109 1777936660985086400 ee11c370d5f49786d15bec7976e278f4 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\binary.zig
-9695 158751886864812938 1777939872990325200 71b02797479ea5a58f027baf82601b48 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\fixtures.zig
+10191 158751886864812938 1777940661320053400 39939fca114d99419edd529a83fa75f1 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\fixtures.zig
 7335 15762598696089613 1777938347460887000 7f1b170ddd0cbb8967360ecdee897486 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\imports.zig
-13149 8444249301612565 1777938357024610600 b00090bad3ff2905f3edba39426471eb 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\instance.zig
-76219 7599824371480616 1777939894625247900 0cd530c28c006d7db803fb1210b4445e 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\interpreter.zig
-20887 11821949022140433 1777939946353007600 8778217b54635198af809334dfbf2de7 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\module.zig
+17678 8444249301612565 1777940737866890500 28fe0653a2b5a46a9fb71f32f81ec8e1 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\instance.zig
+78002 7599824371480616 1777940737933133300 e0040ba10b9b86baa444d32d3542590a 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\interpreter.zig
+24747 11821949022140433 1777940737808999900 a1723529e4bba52470a2c4bb39dd7760 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\module.zig
 18300 81064793292671769 1777935528589880600 dea3fca7d961f3f8fcd81d3a1e17cafc 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasi_nn_abi.zig
 6603 212795082393272387 1777932038518236900 7f03e5d0ec17ab4f861e874b72d7e8f9 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\tensor.zig
 8715 181832834955114433 1777933051525527000 814c559ea28a04611291f7e313de1d82 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasi_nn.zig

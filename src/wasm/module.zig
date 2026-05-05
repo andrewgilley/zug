@@ -74,6 +74,16 @@ pub const Memory = struct {
     limits: Limits,
 };
 
+pub const Table = struct {
+    limits: Limits,
+};
+
+pub const ElementSegment = struct {
+    table_index: u32 = 0,
+    offset: u32,
+    function_indices: []const u32,
+};
+
 pub const DataSegment = struct {
     memory_index: u32 = 0,
     offset: u32,
@@ -89,6 +99,8 @@ pub const Module = struct {
     functions: std.ArrayList(Function) = .empty,
     globals: std.ArrayList(Global) = .empty,
     memories: std.ArrayList(Memory) = .empty,
+    tables: std.ArrayList(Table) = .empty,
+    element_segments: std.ArrayList(ElementSegment) = .empty,
     data_segments: std.ArrayList(DataSegment) = .empty,
     start_function_index: ?u32 = null,
 
@@ -111,10 +123,12 @@ pub const Module = struct {
                 .type => try parseTypeSection(allocator, section.payload, &result),
                 .import => try parseImportSection(allocator, section.payload, &result),
                 .function => try parseFunctionSection(allocator, section.payload, &function_type_indices),
+                .table => try parseTableSection(allocator, section.payload, &result),
                 .memory => try parseMemorySection(allocator, section.payload, &result),
                 .global => try parseGlobalSection(allocator, section.payload, &result),
                 .@"export" => try parseExportSection(allocator, section.payload, &result),
                 .start => try parseStartSection(section.payload, &result),
+                .element => try parseElementSection(allocator, section.payload, &result),
                 .code => try parseCodeSection(allocator, section.payload, function_type_indices.items, &result),
                 .data => try parseDataSection(allocator, section.payload, &result),
                 else => {},
@@ -135,6 +149,11 @@ pub const Module = struct {
         self.functions.deinit(allocator);
         self.globals.deinit(allocator);
         self.memories.deinit(allocator);
+        self.tables.deinit(allocator);
+        for (self.element_segments.items) |segment| {
+            allocator.free(segment.function_indices);
+        }
+        self.element_segments.deinit(allocator);
         self.data_segments.deinit(allocator);
         self.* = undefined;
     }
@@ -188,11 +207,12 @@ fn parseImportSection(allocator: std.mem.Allocator, payload: []const u8, parsed:
                 .type_index = try reader.readVarU32(),
             },
             0x01 => blk: {
-                try skipTableType(&reader);
+                const table = try readTableType(&reader);
                 break :blk Import{
                     .module = module_name,
                     .name = name,
                     .kind = .table,
+                    .limits = table.limits,
                 };
             },
             0x02 => Import{
@@ -241,6 +261,17 @@ fn parseMemorySection(allocator: std.mem.Allocator, payload: []const u8, parsed:
         try parsed.memories.append(allocator, .{
             .limits = try readLimits(&reader),
         });
+    }
+
+    try expectSectionEnd(reader);
+}
+
+fn parseTableSection(allocator: std.mem.Allocator, payload: []const u8, parsed: *Module) !void {
+    var reader = binary.Reader.init(payload);
+    const count = try reader.readVarU32();
+
+    for (0..count) |_| {
+        try parsed.tables.append(allocator, try readTableType(&reader));
     }
 
     try expectSectionEnd(reader);
@@ -314,6 +345,40 @@ fn parseCodeSection(
     try expectSectionEnd(reader);
 }
 
+fn parseElementSection(allocator: std.mem.Allocator, payload: []const u8, parsed: *Module) !void {
+    var reader = binary.Reader.init(payload);
+    const count = try reader.readVarU32();
+
+    for (0..count) |_| {
+        const mode = try reader.readVarU32();
+
+        const segment = switch (mode) {
+            0 => ElementSegment{
+                .table_index = 0,
+                .offset = try readI32ConstExpr(&reader),
+                .function_indices = try readFunctionIndexVector(allocator, &reader),
+            },
+            1 => return error.PassiveElementSegmentUnsupported,
+            2 => blk: {
+                const table_index = try reader.readVarU32();
+                const offset = try readI32ConstExpr(&reader);
+                try readElementKind(&reader);
+                break :blk ElementSegment{
+                    .table_index = table_index,
+                    .offset = offset,
+                    .function_indices = try readFunctionIndexVector(allocator, &reader),
+                };
+            },
+            else => return error.UnsupportedElementSegmentMode,
+        };
+
+        errdefer allocator.free(segment.function_indices);
+        try parsed.element_segments.append(allocator, segment);
+    }
+
+    try expectSectionEnd(reader);
+}
+
 fn parseDataSection(allocator: std.mem.Allocator, payload: []const u8, parsed: *Module) !void {
     var reader = binary.Reader.init(payload);
     const count = try reader.readVarU32();
@@ -361,6 +426,19 @@ fn readValueTypeVector(reader: *binary.Reader) ![]const ValueType {
     return @ptrCast(bytes);
 }
 
+fn readFunctionIndexVector(allocator: std.mem.Allocator, reader: *binary.Reader) ![]const u32 {
+    const len = try reader.readVarU32();
+    const len_usize = std.math.cast(usize, len) orelse return error.FunctionIndexVectorTooLarge;
+    const values = try allocator.alloc(u32, len_usize);
+    errdefer allocator.free(values);
+
+    for (values) |*value| {
+        value.* = try reader.readVarU32();
+    }
+
+    return values;
+}
+
 fn valueTypeFromByte(value: u8) !ValueType {
     return switch (value) {
         0x7f => .i32,
@@ -368,6 +446,15 @@ fn valueTypeFromByte(value: u8) !ValueType {
         0x7d => .f32,
         0x7c => .f64,
         else => error.UnsupportedValueType,
+    };
+}
+
+fn readTableType(reader: *binary.Reader) !Table {
+    const element_type = try reader.readByte();
+    if (element_type != 0x70) return error.UnsupportedTableType;
+
+    return .{
+        .limits = try readLimits(reader),
     };
 }
 
@@ -443,10 +530,12 @@ fn readLimits(reader: *binary.Reader) !Limits {
 }
 
 fn skipTableType(reader: *binary.Reader) !void {
-    const element_type = try reader.readByte();
-    if (element_type != 0x70) return error.UnsupportedTableType;
+    _ = try readTableType(reader);
+}
 
-    _ = try readLimits(reader);
+fn readElementKind(reader: *binary.Reader) !void {
+    const kind = try reader.readByte();
+    if (kind != 0x00) return error.UnsupportedElementKind;
 }
 
 fn skipGlobalType(reader: *binary.Reader) !void {
@@ -634,6 +723,22 @@ test "module parse decodes function bodies" {
     try std.testing.expectEqualStrings("run", parsed.exports.items[0].name);
     try std.testing.expectEqual(ExportKind.function, parsed.exports.items[0].kind);
     try std.testing.expectEqual(@as(u32, 0), parsed.exports.items[0].index);
+}
+
+test "module parse decodes tables and active element segments" {
+    const allocator = std.testing.allocator;
+
+    var parsed = try Module.parse(allocator, @import("fixtures.zig").indirect_function_call);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.tables.items.len);
+    try std.testing.expectEqual(@as(u32, 2), parsed.tables.items[0].limits.min);
+    try std.testing.expect(parsed.tables.items[0].limits.max == null);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.element_segments.items.len);
+    try std.testing.expectEqual(@as(u32, 0), parsed.element_segments.items[0].table_index);
+    try std.testing.expectEqual(@as(u32, 0), parsed.element_segments.items[0].offset);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, parsed.element_segments.items[0].function_indices);
 }
 
 test "module parse decodes active data segments" {
