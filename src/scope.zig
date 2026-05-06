@@ -56,6 +56,21 @@ pub const zug_nn_scope = [_][]const u8{
     "zug_nn.load_preloaded_graph",
 };
 
+pub const zug_gpu_scope = [_][]const u8{
+    "zug_gpu.device_count",
+    "zug_gpu.device_kind",
+    "zug_gpu.device_memory",
+    "zug_gpu.device_queue_count",
+    "zug_gpu.select_device",
+    "zug_gpu.selected_device",
+    "zug_gpu.open_device",
+    "zug_gpu.default_queue",
+    "zug_gpu.create_buffer",
+    "zug_gpu.write_buffer",
+    "zug_gpu.read_buffer",
+    "zug_gpu.dispatch_compute_stub",
+};
+
 pub const model_execution_scope = [_][]const u8{
     "ONNX graph decoding through generated protobuf bindings",
     "CPU execution target",
@@ -63,6 +78,23 @@ pub const model_execution_scope = [_][]const u8{
     "direct host ONNX execution through Session and Executor",
     "raw tensor file input and raw output/expectation checks",
     "runtime benchmark reporting for timing and allocation pressure",
+};
+
+pub const telemetry_scope = [_][]const u8{
+    "agent GET /telemetry",
+    "agent GET /telemetry/events",
+    "agent GET /telemetry/metrics",
+    "agent GET /telemetry/traces",
+    "agent POST /telemetry/events",
+    "agent POST /telemetry/metrics",
+    "agent POST /telemetry/traces",
+    "OTLP/HTTP JSON ingest POST /v1/logs",
+    "OTLP/HTTP JSON ingest POST /v1/metrics",
+    "OTLP/HTTP JSON ingest POST /v1/traces",
+    "OTLP JSON export GET /telemetry/otlp/logs",
+    "OTLP JSON export GET /telemetry/otlp/metrics",
+    "OTLP JSON export GET /telemetry/otlp/traces",
+    "in-memory event, scalar metric and trace span store",
 };
 
 pub const next_capability_frontiers = [_][]const u8{
@@ -89,6 +121,8 @@ pub fn print() void {
     printList("wasi preview1 imports", &wasi_preview1_scope);
     printList("wasi-nn imports", &wasi_nn_scope);
     printList("zug host extension imports", &zug_nn_scope);
+    printList("zug gpu extension imports", &zug_gpu_scope);
+    printList("telemetry", &telemetry_scope);
     printList("next capability frontiers", &next_capability_frontiers);
 }
 
@@ -108,6 +142,12 @@ test "scope import lists match resolver surface" {
     try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "path_open") != null);
     try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "fd_read") != null);
     try std.testing.expect(wasm_imports.Resolver.resolve("wasi_snapshot_preview1", "fd_readdir") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "device_count") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "device_memory") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "device_queue_count") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "open_device") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "create_buffer") != null);
+    try std.testing.expect(wasm_imports.Resolver.resolve("zug_gpu", "dispatch_compute_stub") != null);
 }
 
 test "scope includes active model compatibility surface" {

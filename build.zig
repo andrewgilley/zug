@@ -138,6 +138,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const telemetry_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const gpu_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gpu.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const agent_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/agent.zig"),
@@ -192,6 +208,8 @@ pub fn build(b: *std.Build) void {
     const run_scope_tests = b.addRunArtifact(scope_tests);
     const run_target_tests = b.addRunArtifact(target_tests);
     const run_network_tests = b.addRunArtifact(network_tests);
+    const run_telemetry_tests = b.addRunArtifact(telemetry_tests);
+    const run_gpu_tests = b.addRunArtifact(gpu_tests);
     const run_agent_tests = b.addRunArtifact(agent_tests);
     const run_workload_tests = b.addRunArtifact(workload_tests);
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
@@ -206,6 +224,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_scope_tests.step);
     test_step.dependOn(&run_target_tests.step);
     test_step.dependOn(&run_network_tests.step);
+    test_step.dependOn(&run_telemetry_tests.step);
+    test_step.dependOn(&run_gpu_tests.step);
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_workload_tests.step);
     test_step.dependOn(&run_wasm_tests.step);
@@ -288,11 +308,28 @@ pub fn build(b: *std.Build) void {
     const guest_wasi_nn_full_step = b.step("guest-wasi-nn-full", "Build the full WASI-NN external wasm guest");
     guest_wasi_nn_full_step.dependOn(&guest_wasi_nn_full.step);
 
+    const guest_gpu_probe = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/gpu_probe.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/gpu_probe.wasm",
+    });
+
+    const guest_gpu_probe_step = b.step("guest-gpu-probe", "Build the GPU control external wasm guest");
+    guest_gpu_probe_step.dependOn(&guest_gpu_probe.step);
+
     const guests_step = b.step("guests", "Build all external wasm guest fixtures");
     guests_step.dependOn(&guest_basic.step);
     guests_step.dependOn(&guest_wasi_log.step);
     guests_step.dependOn(&guest_wasi_nn_smoke.step);
     guests_step.dependOn(&guest_wasi_nn_full.step);
+    guests_step.dependOn(&guest_gpu_probe.step);
 
     const run_basic_guest = b.addRunArtifact(exe);
     run_basic_guest.addArgs(&.{ "wasm", "zig-out/basic.wasm", "--arg", "7" });
@@ -310,11 +347,16 @@ pub fn build(b: *std.Build) void {
     run_wasi_nn_full_guest.addArgs(&.{ "wasm", "zig-out/wasi_nn_full.wasm", "--manifest", "guests/wasi_nn_full.zugmanifest", "--model", "models/tiny_mnist.onnx" });
     run_wasi_nn_full_guest.step.dependOn(&guest_wasi_nn_full.step);
 
+    const run_gpu_probe_guest = b.addRunArtifact(exe);
+    run_gpu_probe_guest.addArgs(&.{ "wasm", "zig-out/gpu_probe.wasm", "--mock-gpu" });
+    run_gpu_probe_guest.step.dependOn(&guest_gpu_probe.step);
+
     const test_external_wasm_step = b.step("test-external-wasm", "Build and run external wasm guests through zug");
     test_external_wasm_step.dependOn(&run_basic_guest.step);
     test_external_wasm_step.dependOn(&run_wasi_log_guest.step);
     test_external_wasm_step.dependOn(&run_wasi_nn_smoke_guest.step);
     test_external_wasm_step.dependOn(&run_wasi_nn_full_guest.step);
+    test_external_wasm_step.dependOn(&run_gpu_probe_guest.step);
 
     const prove_wasm_ml_abi_step = b.step("prove-wasm-ml-abi", "Prove a WASM guest can drive ONNX execution through the stable WASI-NN ABI");
     prove_wasm_ml_abi_step.dependOn(&run_wasi_nn_abi_tests.step);

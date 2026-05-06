@@ -7,6 +7,7 @@ const capabilities = @import("capabilities.zig");
 const benchmark = @import("benchmark.zig");
 const check = @import("check.zig");
 const agent = @import("agent.zig");
+const gpu = @import("gpu.zig");
 const scope = @import("scope.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
@@ -64,6 +65,7 @@ const CliArgs = struct {
     agent_profile_name: ?[]const u8 = null,
     agent_listen: ?[]const u8 = null,
     agent_once: bool = false,
+    mock_gpu: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         allocator.free(self.model_path);
@@ -142,6 +144,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .profile_name = cli.agent_profile_name orelse "vision-f32-basic",
             .listen = cli.agent_listen orelse "127.0.0.1:7070",
             .once = cli.agent_once,
+            .gpu = if (cli.mock_gpu) gpu.mockEdgeCapabilities() else .{},
         });
         return;
     }
@@ -381,6 +384,11 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
                 continue;
             }
 
+            if (std.mem.eql(u8, arg, "--mock-gpu")) {
+                cli.mock_gpu = true;
+                continue;
+            }
+
             printUsage();
             return error.UnknownArgument;
         }
@@ -526,6 +534,11 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
                 continue;
             }
 
+            if (std.mem.eql(u8, arg, "--mock-gpu")) {
+                cli.mock_gpu = true;
+                continue;
+            }
+
             printUsage();
             return error.UnknownArgument;
         }
@@ -631,12 +644,12 @@ fn printUsage() void {
     std.debug.print(
         \\usage:
         \\  zug scope
-        \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once]
+        \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once] [--mock-gpu]
         \\  zug check <file.onnx|file.wasm|workload/> [--kind auto|onnx|wasm|workload] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
         \\  zug bench <model.onnx> --input name=file.f32 [--warmup count] [--iterations count] [--format text|json] [--trace]
         \\  zug <model.onnx> [--input name=file.f32] [--output name=file.raw] [--expect name=file.raw] [--tolerance value]
-        \\  zug wasm <module.wasm> [--manifest manifest] [--export name] [--model model.onnx] [--model-offset bytes] [--arg i32]
+        \\  zug wasm <module.wasm> [--manifest manifest] [--export name] [--model model.onnx] [--model-offset bytes] [--arg i32] [--mock-gpu]
         \\
         \\onnx:
         \\  scope prints the current runtime capability contract
@@ -650,13 +663,19 @@ fn printUsage() void {
         \\  --manifest checks runtime requirements before execution
         \\  --model exposes a host-managed model to zug_nn.load_preloaded_graph
         \\  --model-offset also writes that model into guest memory for legacy guests
+        \\  --mock-gpu enables a host mock GPU device for exercising the zug_gpu resource ABI
         \\
         \\agent:
-        \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads over HTTP
+        \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads, GET /telemetry over HTTP
         \\  POST /workloads/check with {{"path":"workload/"}} returns compatibility JSON
         \\  POST /workloads/deploy with {{"path":"workload/"}} registers a supported workload
         \\  POST /workloads/<id>/invoke runs a registered workload entrypoint with optional {{"args":[i32],"stdin":"..."}}
+        \\  POST /telemetry/events with {{"source":"camera","kind":"frame_drop","severity":"warn","message":"..."}} records an event
+        \\  POST /telemetry/metrics with {{"source":"runtime","name":"latency_ms","value":14.5,"unit":"ms"}} records a scalar metric
+        \\  POST /telemetry/traces records a local trace span
+        \\  POST /v1/logs, POST /v1/metrics and POST /v1/traces accept OTLP/HTTP JSON from OpenTelemetry clients
         \\  --once accepts one TCP request and then exits
+        \\  --mock-gpu advertises a mock integrated GPU device to deployed WASM workloads
         \\
     , .{});
 }
@@ -1128,6 +1147,7 @@ fn runWasmModule(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
     surface.setPreloadedModel(model_bytes);
 
     var resolver = wasm_imports.Resolver.init(&surface);
+    resolver.gpu = if (cli.mock_gpu) gpu.mockEdgeCapabilities() else .{};
     defer resolver.deinit();
 
     try wasm_instance.bindImports(&resolver);

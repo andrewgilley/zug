@@ -1,9 +1,11 @@
 const std = @import("std");
 const capabilities = @import("capabilities.zig");
+const gpu = @import("gpu.zig");
 const network = @import("network.zig");
 const onnx = @import("proto/onnx.pb.zig");
 const scope = @import("scope.zig");
 const target_profile = @import("target.zig");
+const telemetry = @import("telemetry.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
 const workload = @import("workload.zig");
 const wasm_compatibility = @import("wasm/compatibility.zig");
@@ -19,6 +21,7 @@ pub const Config = struct {
     listen: []const u8 = "127.0.0.1:7070",
     once: bool = false,
     policy: RuntimePolicy = .{},
+    gpu: gpu.Capabilities = .{},
 };
 
 pub const RuntimePolicy = struct {
@@ -122,8 +125,11 @@ pub const State = struct {
     next_workload_id: u64 = 1,
     activities: std.ArrayList(Activity) = .empty,
     workloads: std.ArrayList(RegisteredWorkload) = .empty,
+    telemetry_store: telemetry.Store = .{},
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.telemetry_store.deinit(allocator);
+
         for (self.workloads.items) |*registered| {
             registered.deinit(allocator);
         }
@@ -353,6 +359,48 @@ pub fn responseForRequestWithState(
             return jsonResponse(allocator, .ok, body);
         }
 
+        if (std.mem.eql(u8, path, "/telemetry")) {
+            const body = try telemetryJson(allocator, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/events")) {
+            const body = try telemetryEventsJson(allocator, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/metrics")) {
+            const body = try telemetryMetricsJson(allocator, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/traces")) {
+            const body = try telemetryTracesJson(allocator, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/otlp/logs")) {
+            const body = try otlpLogsJson(allocator, config, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/otlp/metrics")) {
+            const body = try otlpMetricsJson(allocator, config, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/otlp/traces")) {
+            const body = try otlpTracesJson(allocator, config, state.telemetry_store);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
         if (std.mem.eql(u8, path, "/workloads")) {
             const body = try workloadsJson(allocator, state.*);
             defer allocator.free(body);
@@ -383,13 +431,79 @@ pub fn responseForRequestWithState(
             return jsonResponse(allocator, .ok, body);
         }
 
+        if (std.mem.eql(u8, path, "/telemetry/events")) {
+            const input = parseTelemetryEventRequest(requestBody(request), config.policy) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_event\"}");
+            };
+
+            const event = state.telemetry_store.recordEvent(allocator, input, monotonicNowNs()) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_event\"}");
+            };
+
+            const body = try telemetryEventAcceptedJson(allocator, event);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/metrics")) {
+            const input = parseTelemetryMetricRequest(requestBody(request), config.policy) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_metric\"}");
+            };
+
+            const metric = state.telemetry_store.recordMetric(allocator, input, monotonicNowNs()) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_metric\"}");
+            };
+
+            const body = try telemetryMetricAcceptedJson(allocator, metric);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/telemetry/traces")) {
+            const input = parseTelemetryTraceRequest(requestBody(request), config.policy) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_trace\"}");
+            };
+
+            const span = state.telemetry_store.recordTrace(allocator, input) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_telemetry_trace\"}");
+            };
+
+            const body = try telemetryTraceAcceptedJson(allocator, span);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/v1/logs")) {
+            ingestOtlpLogs(allocator, requestBody(request), config.policy, &state.telemetry_store) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_otlp_logs\"}");
+            };
+
+            return jsonResponse(allocator, .ok, "{}");
+        }
+
+        if (std.mem.eql(u8, path, "/v1/metrics")) {
+            ingestOtlpMetrics(allocator, requestBody(request), config.policy, &state.telemetry_store) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_otlp_metrics\"}");
+            };
+
+            return jsonResponse(allocator, .ok, "{}");
+        }
+
+        if (std.mem.eql(u8, path, "/v1/traces")) {
+            ingestOtlpTraces(allocator, requestBody(request), config.policy, &state.telemetry_store) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_otlp_traces\"}");
+            };
+
+            return jsonResponse(allocator, .ok, "{}");
+        }
+
         if (parseInvokeWorkloadId(path)) |workload_id| {
             var invoke_request = parseInvokeRequest(allocator, requestBody(request), config.policy) catch {
                 return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_workload_invoke_request\"}");
             };
             defer invoke_request.deinit(allocator);
 
-            const body = try workloadInvokeJson(allocator, workload_id, invoke_request, config.policy, state);
+            const body = try workloadInvokeJson(allocator, workload_id, invoke_request, config.policy, config.gpu, state);
             defer allocator.free(body);
             return jsonResponse(allocator, .ok, body);
         } else |err| switch (err) {
@@ -541,6 +655,215 @@ fn parseInvokeRequest(
     };
 }
 
+fn parseTelemetryEventRequest(body: []const u8, policy: RuntimePolicy) !telemetry.EventInput {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const source = jsonStringField(body, "source") catch |err| switch (err) {
+        error.MissingJsonField => "agent",
+        else => return err,
+    };
+    const severity_name = jsonStringField(body, "severity") catch |err| switch (err) {
+        error.MissingJsonField => "info",
+        else => return err,
+    };
+
+    return .{
+        .source = source,
+        .kind = try jsonStringField(body, "kind"),
+        .message = try jsonStringField(body, "message"),
+        .severity = telemetry.parseSeverity(severity_name) orelse return error.InvalidTelemetrySeverity,
+    };
+}
+
+fn parseTelemetryMetricRequest(body: []const u8, policy: RuntimePolicy) !telemetry.MetricInput {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const source = jsonStringField(body, "source") catch |err| switch (err) {
+        error.MissingJsonField => "agent",
+        else => return err,
+    };
+    const unit = jsonStringField(body, "unit") catch |err| switch (err) {
+        error.MissingJsonField => "",
+        else => return err,
+    };
+
+    return .{
+        .source = source,
+        .name = try jsonStringField(body, "name"),
+        .value = try jsonF64Field(body, "value"),
+        .unit = unit,
+    };
+}
+
+fn parseTelemetryTraceRequest(body: []const u8, policy: RuntimePolicy) !telemetry.TraceInput {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const source = jsonStringField(body, "source") catch |err| switch (err) {
+        error.MissingJsonField => "agent",
+        else => return err,
+    };
+    const parent_span_id = jsonStringField(body, "parent_span_id") catch |err| switch (err) {
+        error.MissingJsonField => "",
+        else => return err,
+    };
+    const kind_name = jsonStringField(body, "kind") catch |err| switch (err) {
+        error.MissingJsonField => "internal",
+        else => return err,
+    };
+    const status_name = jsonStringField(body, "status") catch |err| switch (err) {
+        error.MissingJsonField => "unset",
+        else => return err,
+    };
+
+    return .{
+        .source = source,
+        .trace_id = try jsonStringField(body, "trace_id"),
+        .span_id = try jsonStringField(body, "span_id"),
+        .parent_span_id = parent_span_id,
+        .name = try jsonStringField(body, "name"),
+        .kind = telemetry.parseSpanKind(kind_name) orelse return error.InvalidTelemetrySpanKind,
+        .start_time_ns = try jsonU64Field(body, "start_time_ns"),
+        .end_time_ns = try jsonU64Field(body, "end_time_ns"),
+        .status = telemetry.parseSpanStatus(status_name) orelse return error.InvalidTelemetrySpanStatus,
+    };
+}
+
+fn ingestOtlpLogs(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    policy: RuntimePolicy,
+    store: *telemetry.Store,
+) !void {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const resource_logs = jsonArrayField(root, "resourceLogs") orelse return error.MissingOtlpResourceLogs;
+    var accepted: usize = 0;
+
+    for (resource_logs.items) |resource_log| {
+        const source = otlpSource(resource_log);
+        const scope_logs = jsonArrayField(resource_log, "scopeLogs") orelse continue;
+
+        for (scope_logs.items) |scope_log| {
+            const log_records = jsonArrayField(scope_log, "logRecords") orelse continue;
+
+            for (log_records.items) |record| {
+                const message = otlpLogBody(record) orelse "otel log record";
+                const kind = otlpAttributeString(record, "event.name") orelse "otel.log";
+                const severity = otlpLogSeverity(record);
+                _ = try store.recordEvent(allocator, .{
+                    .source = source,
+                    .kind = kind,
+                    .message = message,
+                    .severity = severity,
+                }, otlpTimestamp(record) orelse monotonicNowNs());
+                accepted += 1;
+            }
+        }
+    }
+
+    if (accepted == 0) return error.EmptyOtlpLogs;
+}
+
+fn ingestOtlpMetrics(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    policy: RuntimePolicy,
+    store: *telemetry.Store,
+) !void {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const resource_metrics = jsonArrayField(root, "resourceMetrics") orelse return error.MissingOtlpResourceMetrics;
+    var accepted: usize = 0;
+
+    for (resource_metrics.items) |resource_metric| {
+        const source = otlpSource(resource_metric);
+        const scope_metrics = jsonArrayField(resource_metric, "scopeMetrics") orelse continue;
+
+        for (scope_metrics.items) |scope_metric| {
+            const metrics = jsonArrayField(scope_metric, "metrics") orelse continue;
+
+            for (metrics.items) |metric| {
+                const name = jsonStringFieldValue(metric, "name") orelse continue;
+                const unit = jsonStringFieldValue(metric, "unit") orelse "";
+                const datapoints = otlpMetricDataPoints(metric) orelse continue;
+
+                for (datapoints.items) |datapoint| {
+                    const value = otlpMetricValue(datapoint) orelse continue;
+                    _ = try store.recordMetric(allocator, .{
+                        .source = source,
+                        .name = name,
+                        .value = value,
+                        .unit = unit,
+                    }, otlpTimestamp(datapoint) orelse monotonicNowNs());
+                    accepted += 1;
+                }
+            }
+        }
+    }
+
+    if (accepted == 0) return error.EmptyOtlpMetrics;
+}
+
+fn ingestOtlpTraces(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    policy: RuntimePolicy,
+    store: *telemetry.Store,
+) !void {
+    if (body.len > policy.max_request_body_bytes) return error.TelemetryRequestBodyTooLarge;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const resource_spans = jsonArrayField(root, "resourceSpans") orelse return error.MissingOtlpResourceSpans;
+    var accepted: usize = 0;
+
+    for (resource_spans.items) |resource_span| {
+        const source = otlpSource(resource_span);
+        const scope_spans = jsonArrayField(resource_span, "scopeSpans") orelse continue;
+
+        for (scope_spans.items) |scope_span| {
+            const spans = jsonArrayField(scope_span, "spans") orelse continue;
+
+            for (spans.items) |span| {
+                const trace_id = jsonStringFieldValue(span, "traceId") orelse continue;
+                const span_id = jsonStringFieldValue(span, "spanId") orelse continue;
+                const name = jsonStringFieldValue(span, "name") orelse continue;
+
+                _ = try store.recordTrace(allocator, .{
+                    .source = source,
+                    .trace_id = trace_id,
+                    .span_id = span_id,
+                    .parent_span_id = jsonStringFieldValue(span, "parentSpanId") orelse "",
+                    .name = name,
+                    .kind = otlpSpanKind(span),
+                    .start_time_ns = otlpStartTimestamp(span) orelse 0,
+                    .end_time_ns = otlpEndTimestamp(span) orelse 0,
+                    .status = otlpSpanStatus(span),
+                });
+                accepted += 1;
+            }
+        }
+    }
+
+    if (accepted == 0) return error.EmptyOtlpTraces;
+}
+
 fn jsonStringField(body: []const u8, field_name: []const u8) ![]const u8 {
     var index: usize = 0;
     while (index < body.len) {
@@ -563,6 +886,49 @@ fn jsonStringField(body: []const u8, field_name: []const u8) ![]const u8 {
         const value_start = index + 1;
         const value_end = try jsonStringEnd(body, value_start);
         return try decodeJsonString(body[value_start..value_end]);
+    }
+
+    return error.MissingJsonField;
+}
+
+fn jsonF64Field(body: []const u8, field_name: []const u8) !f64 {
+    const raw = try jsonNumberField(body, field_name);
+    return std.fmt.parseFloat(f64, raw) catch error.InvalidJsonNumber;
+}
+
+fn jsonU64Field(body: []const u8, field_name: []const u8) !u64 {
+    const raw = try jsonNumberField(body, field_name);
+    return std.fmt.parseInt(u64, raw, 10) catch error.InvalidJsonNumber;
+}
+
+fn jsonNumberField(body: []const u8, field_name: []const u8) ![]const u8 {
+    var index: usize = 0;
+    while (index < body.len) {
+        if (body[index] != '"') {
+            index += 1;
+            continue;
+        }
+
+        const key_start = index + 1;
+        const key_end = try jsonStringEnd(body, key_start);
+        const key = body[key_start..key_end];
+        index = skipJsonWhitespace(body, key_end + 1);
+
+        if (index >= body.len or body[index] != ':') continue;
+        index = skipJsonWhitespace(body, index + 1);
+
+        if (!std.mem.eql(u8, key, field_name)) continue;
+
+        const value_start = index;
+        while (index < body.len) : (index += 1) {
+            switch (body[index]) {
+                '0'...'9', '-', '+', '.', 'e', 'E' => {},
+                else => break,
+            }
+        }
+
+        if (index == value_start) return error.ExpectedJsonNumber;
+        return body[value_start..index];
     }
 
     return error.MissingJsonField;
@@ -628,6 +994,159 @@ fn parseJsonU32Array(allocator: std.mem.Allocator, body: []const u8, start: usiz
     }
 
     return error.UnterminatedJsonArray;
+}
+
+fn jsonObjectField(value: std.json.Value, field_name: []const u8) ?std.json.Value {
+    if (value != .object) return null;
+    return value.object.get(field_name);
+}
+
+fn jsonArrayField(value: std.json.Value, field_name: []const u8) ?std.json.Array {
+    const field = jsonObjectField(value, field_name) orelse return null;
+    if (field != .array) return null;
+    return field.array;
+}
+
+fn jsonStringFieldValue(value: std.json.Value, field_name: []const u8) ?[]const u8 {
+    const field = jsonObjectField(value, field_name) orelse return null;
+    return jsonValueAsString(field);
+}
+
+fn jsonValueAsString(value: std.json.Value) ?[]const u8 {
+    return switch (value) {
+        .string => |actual| actual,
+        .number_string => |actual| actual,
+        else => null,
+    };
+}
+
+fn jsonValueAsF64(value: std.json.Value) ?f64 {
+    return switch (value) {
+        .float => |actual| actual,
+        .integer => |actual| @floatFromInt(actual),
+        .number_string => |actual| std.fmt.parseFloat(f64, actual) catch null,
+        .string => |actual| std.fmt.parseFloat(f64, actual) catch null,
+        else => null,
+    };
+}
+
+fn jsonValueAsU64(value: std.json.Value) ?u64 {
+    return switch (value) {
+        .integer => |actual| if (actual >= 0) @intCast(actual) else null,
+        .number_string => |actual| std.fmt.parseInt(u64, actual, 10) catch null,
+        .string => |actual| std.fmt.parseInt(u64, actual, 10) catch null,
+        else => null,
+    };
+}
+
+fn otlpSource(resource_container: std.json.Value) []const u8 {
+    const resource = jsonObjectField(resource_container, "resource") orelse return "otel";
+    return otlpAttributeString(resource, "service.name") orelse "otel";
+}
+
+fn otlpAttributeString(container: std.json.Value, key_name: []const u8) ?[]const u8 {
+    const attributes = jsonArrayField(container, "attributes") orelse return null;
+    for (attributes.items) |attribute| {
+        const key = jsonStringFieldValue(attribute, "key") orelse continue;
+        if (!std.mem.eql(u8, key, key_name)) continue;
+        const value = jsonObjectField(attribute, "value") orelse return null;
+        return otlpAnyValueString(value);
+    }
+    return null;
+}
+
+fn otlpAnyValueString(value: std.json.Value) ?[]const u8 {
+    if (value == .string or value == .number_string) return jsonValueAsString(value);
+    if (value != .object) return null;
+    if (jsonStringFieldValue(value, "stringValue")) |actual| return actual;
+    if (jsonStringFieldValue(value, "intValue")) |actual| return actual;
+    if (jsonStringFieldValue(value, "doubleValue")) |actual| return actual;
+    if (jsonStringFieldValue(value, "boolValue")) |actual| return actual;
+    return null;
+}
+
+fn otlpLogBody(record: std.json.Value) ?[]const u8 {
+    const body = jsonObjectField(record, "body") orelse return null;
+    return otlpAnyValueString(body);
+}
+
+fn otlpLogSeverity(record: std.json.Value) telemetry.Severity {
+    if (jsonStringFieldValue(record, "severityText")) |severity_text| {
+        if (std.ascii.eqlIgnoreCase(severity_text, "error") or
+            std.ascii.eqlIgnoreCase(severity_text, "err") or
+            std.ascii.eqlIgnoreCase(severity_text, "fatal"))
+        {
+            return .err;
+        }
+        if (std.ascii.eqlIgnoreCase(severity_text, "warn") or
+            std.ascii.eqlIgnoreCase(severity_text, "warning"))
+        {
+            return .warn;
+        }
+    }
+
+    const severity_number_value = jsonObjectField(record, "severityNumber") orelse return .info;
+    const severity_number = jsonValueAsU64(severity_number_value) orelse return .info;
+    if (severity_number >= 17) return .err;
+    if (severity_number >= 13) return .warn;
+    return .info;
+}
+
+fn otlpTimestamp(value: std.json.Value) ?u64 {
+    const time_value = jsonObjectField(value, "timeUnixNano") orelse
+        jsonObjectField(value, "observedTimeUnixNano") orelse
+        return null;
+    return jsonValueAsU64(time_value);
+}
+
+fn otlpStartTimestamp(value: std.json.Value) ?u64 {
+    const time_value = jsonObjectField(value, "startTimeUnixNano") orelse return null;
+    return jsonValueAsU64(time_value);
+}
+
+fn otlpEndTimestamp(value: std.json.Value) ?u64 {
+    const time_value = jsonObjectField(value, "endTimeUnixNano") orelse return null;
+    return jsonValueAsU64(time_value);
+}
+
+fn otlpSpanKind(span: std.json.Value) telemetry.SpanKind {
+    const value = jsonObjectField(span, "kind") orelse return .unspecified;
+    const kind = jsonValueAsU64(value) orelse return .unspecified;
+    return switch (kind) {
+        1 => .internal,
+        2 => .server,
+        3 => .client,
+        4 => .producer,
+        5 => .consumer,
+        else => .unspecified,
+    };
+}
+
+fn otlpSpanStatus(span: std.json.Value) telemetry.SpanStatus {
+    const status = jsonObjectField(span, "status") orelse return .unset;
+    const code_value = jsonObjectField(status, "code") orelse return .unset;
+    const code = jsonValueAsU64(code_value) orelse return .unset;
+    return switch (code) {
+        1 => .ok,
+        2 => .err,
+        else => .unset,
+    };
+}
+
+fn otlpMetricDataPoints(metric: std.json.Value) ?std.json.Array {
+    if (jsonObjectField(metric, "gauge")) |gauge| {
+        if (jsonArrayField(gauge, "dataPoints")) |points| return points;
+    }
+    if (jsonObjectField(metric, "sum")) |sum| {
+        if (jsonArrayField(sum, "dataPoints")) |points| return points;
+    }
+    return null;
+}
+
+fn otlpMetricValue(datapoint: std.json.Value) ?f64 {
+    if (jsonObjectField(datapoint, "asDouble")) |value| return jsonValueAsF64(value);
+    if (jsonObjectField(datapoint, "asInt")) |value| return jsonValueAsF64(value);
+    return null;
 }
 
 fn jsonStringEnd(body: []const u8, start: usize) !usize {
@@ -784,13 +1303,14 @@ fn workloadInvokeJson(
     workload_id: u64,
     request: InvokeRequest,
     policy: RuntimePolicy,
+    gpu_caps: gpu.Capabilities,
     state: *State,
 ) ![]u8 {
     const registered = state.findWorkloadById(workload_id) orelse {
         return workloadInvokeMissingJson(allocator, workload_id);
     };
 
-    var result = executeRegisteredWorkload(allocator, registered.*, request, policy) catch |err| {
+    var result = executeRegisteredWorkload(allocator, registered.*, request, policy, gpu_caps) catch |err| {
         registered.status = .failed;
         try registered.setLastError(allocator, @errorName(err));
         const activity_id = try state.record(allocator, .workload_invoke, .failed, registered.path, @errorName(err));
@@ -812,6 +1332,7 @@ fn executeRegisteredWorkload(
     registered: RegisteredWorkload,
     request: InvokeRequest,
     policy: RuntimePolicy,
+    gpu_caps: gpu.Capabilities,
 ) !InvokeResult {
     const started_ns = monotonicNowNs();
 
@@ -859,6 +1380,7 @@ fn executeRegisteredWorkload(
 
     var resolver = wasm_imports.Resolver.init(&surface);
     resolver.stdin = request.stdin;
+    resolver.gpu = gpu_caps;
     defer resolver.deinit();
 
     try wasm_instance.bindImports(&resolver);
@@ -1018,6 +1540,430 @@ fn workloadsJson(allocator: std.mem.Allocator, state: State) ![]u8 {
     try json.endObject();
 
     return try out.toOwnedSlice();
+}
+
+fn telemetryJson(allocator: std.mem.Allocator, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("events");
+    try writeTelemetryEvents(&json, store);
+    try json.objectField("metrics");
+    try writeTelemetryMetrics(&json, store);
+    try json.objectField("traces");
+    try writeTelemetryTraces(&json, store);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryEventsJson(allocator: std.mem.Allocator, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("items");
+    try writeTelemetryEvents(&json, store);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryMetricsJson(allocator: std.mem.Allocator, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("items");
+    try writeTelemetryMetrics(&json, store);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryTracesJson(allocator: std.mem.Allocator, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("items");
+    try writeTelemetryTraces(&json, store);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryEventAcceptedJson(allocator: std.mem.Allocator, event: telemetry.Event) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("telemetry_event");
+    try json.objectField("accepted");
+    try json.write(true);
+    try json.objectField("event");
+    try writeTelemetryEvent(&json, event);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryMetricAcceptedJson(allocator: std.mem.Allocator, metric: telemetry.Metric) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("telemetry_metric");
+    try json.objectField("accepted");
+    try json.write(true);
+    try json.objectField("metric");
+    try writeTelemetryMetric(&json, metric);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn telemetryTraceAcceptedJson(allocator: std.mem.Allocator, span: telemetry.TraceSpan) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("telemetry_trace");
+    try json.objectField("accepted");
+    try json.write(true);
+    try json.objectField("span");
+    try writeTelemetryTrace(&json, span);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn otlpLogsJson(allocator: std.mem.Allocator, config: Config, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("resourceLogs");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("resource");
+    try writeOtlpResource(&json, config);
+    try json.objectField("scopeLogs");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("scope");
+    try writeOtlpScope(&json);
+    try json.objectField("logRecords");
+    try json.beginArray();
+    for (store.events.items) |event| {
+        try writeOtlpLogRecord(&json, event);
+    }
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn otlpTracesJson(allocator: std.mem.Allocator, config: Config, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("resourceSpans");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("resource");
+    try writeOtlpResource(&json, config);
+    try json.objectField("scopeSpans");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("scope");
+    try writeOtlpScope(&json);
+    try json.objectField("spans");
+    try json.beginArray();
+    for (store.traces.items) |span| {
+        try writeOtlpSpan(&json, span);
+    }
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn otlpMetricsJson(allocator: std.mem.Allocator, config: Config, store: telemetry.Store) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("resourceMetrics");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("resource");
+    try writeOtlpResource(&json, config);
+    try json.objectField("scopeMetrics");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("scope");
+    try writeOtlpScope(&json);
+    try json.objectField("metrics");
+    try json.beginArray();
+    for (store.metrics.items) |metric| {
+        try writeOtlpMetric(&json, metric);
+    }
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn writeOtlpResource(json: *std.json.Stringify, config: Config) !void {
+    try json.beginObject();
+    try json.objectField("attributes");
+    try json.beginArray();
+    try writeOtlpStringAttribute(json, "service.name", "zug");
+    try writeOtlpStringAttribute(json, "service.namespace", "edge-runtime");
+    try writeOtlpStringAttribute(json, "service.instance.id", config.node_id);
+    try writeOtlpStringAttribute(json, "zug.profile", config.profile_name);
+    try json.endArray();
+    try json.endObject();
+}
+
+fn writeOtlpScope(json: *std.json.Stringify) !void {
+    try json.beginObject();
+    try json.objectField("name");
+    try json.write("zug.agent");
+    try json.objectField("version");
+    try json.write(scope.runtime_scope_version);
+    try json.endObject();
+}
+
+fn writeOtlpLogRecord(json: *std.json.Stringify, event: telemetry.Event) !void {
+    try json.beginObject();
+    try json.objectField("timeUnixNano");
+    try writeU64JsonString(json, event.timestamp_ns);
+    try json.objectField("severityText");
+    try json.write(otlpSeverityText(event.severity));
+    try json.objectField("body");
+    try json.beginObject();
+    try json.objectField("stringValue");
+    try json.write(event.message);
+    try json.endObject();
+    try json.objectField("attributes");
+    try json.beginArray();
+    try writeOtlpStringAttribute(json, "zug.source", event.source);
+    try writeOtlpStringAttribute(json, "zug.kind", event.kind);
+    try writeOtlpStringAttribute(json, "event.name", event.kind);
+    try json.endArray();
+    try json.endObject();
+}
+
+fn writeOtlpSpan(json: *std.json.Stringify, span: telemetry.TraceSpan) !void {
+    try json.beginObject();
+    try json.objectField("traceId");
+    try json.write(span.trace_id);
+    try json.objectField("spanId");
+    try json.write(span.span_id);
+    if (span.parent_span_id.len != 0) {
+        try json.objectField("parentSpanId");
+        try json.write(span.parent_span_id);
+    }
+    try json.objectField("name");
+    try json.write(span.name);
+    try json.objectField("kind");
+    try json.write(otlpSpanKindCode(span.kind));
+    try json.objectField("startTimeUnixNano");
+    try writeU64JsonString(json, span.start_time_ns);
+    try json.objectField("endTimeUnixNano");
+    try writeU64JsonString(json, span.end_time_ns);
+    try json.objectField("status");
+    try json.beginObject();
+    try json.objectField("code");
+    try json.write(otlpSpanStatusCode(span.status));
+    try json.endObject();
+    try json.objectField("attributes");
+    try json.beginArray();
+    try writeOtlpStringAttribute(json, "zug.source", span.source);
+    try json.endArray();
+    try json.endObject();
+}
+
+fn writeOtlpMetric(json: *std.json.Stringify, metric: telemetry.Metric) !void {
+    try json.beginObject();
+    try json.objectField("name");
+    try json.write(metric.name);
+    try json.objectField("unit");
+    try json.write(metric.unit);
+    try json.objectField("gauge");
+    try json.beginObject();
+    try json.objectField("dataPoints");
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("timeUnixNano");
+    try writeU64JsonString(json, metric.timestamp_ns);
+    try json.objectField("asDouble");
+    try json.write(metric.value);
+    try json.objectField("attributes");
+    try json.beginArray();
+    try writeOtlpStringAttribute(json, "zug.source", metric.source);
+    try json.endArray();
+    try json.endObject();
+    try json.endArray();
+    try json.endObject();
+    try json.endObject();
+}
+
+fn writeOtlpStringAttribute(json: *std.json.Stringify, key: []const u8, value: []const u8) !void {
+    try json.beginObject();
+    try json.objectField("key");
+    try json.write(key);
+    try json.objectField("value");
+    try json.beginObject();
+    try json.objectField("stringValue");
+    try json.write(value);
+    try json.endObject();
+    try json.endObject();
+}
+
+fn writeU64JsonString(json: *std.json.Stringify, value: u64) !void {
+    var buffer: [20]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{d}", .{value});
+    try json.write(text);
+}
+
+fn otlpSeverityText(severity: telemetry.Severity) []const u8 {
+    return switch (severity) {
+        .info => "INFO",
+        .warn => "WARN",
+        .err => "ERROR",
+    };
+}
+
+fn otlpSpanKindCode(kind: telemetry.SpanKind) u32 {
+    return switch (kind) {
+        .unspecified => 0,
+        .internal => 1,
+        .server => 2,
+        .client => 3,
+        .producer => 4,
+        .consumer => 5,
+    };
+}
+
+fn otlpSpanStatusCode(status: telemetry.SpanStatus) u32 {
+    return switch (status) {
+        .unset => 0,
+        .ok => 1,
+        .err => 2,
+    };
+}
+
+fn writeTelemetryEvents(json: *std.json.Stringify, store: telemetry.Store) !void {
+    try json.beginArray();
+    for (store.events.items) |event| {
+        try writeTelemetryEvent(json, event);
+    }
+    try json.endArray();
+}
+
+fn writeTelemetryMetrics(json: *std.json.Stringify, store: telemetry.Store) !void {
+    try json.beginArray();
+    for (store.metrics.items) |metric| {
+        try writeTelemetryMetric(json, metric);
+    }
+    try json.endArray();
+}
+
+fn writeTelemetryTraces(json: *std.json.Stringify, store: telemetry.Store) !void {
+    try json.beginArray();
+    for (store.traces.items) |span| {
+        try writeTelemetryTrace(json, span);
+    }
+    try json.endArray();
+}
+
+fn writeTelemetryEvent(json: *std.json.Stringify, event: telemetry.Event) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    try json.write(event.id);
+    try json.objectField("timestamp_ns");
+    try json.write(event.timestamp_ns);
+    try json.objectField("source");
+    try json.write(event.source);
+    try json.objectField("kind");
+    try json.write(event.kind);
+    try json.objectField("severity");
+    try json.write(telemetry.severityName(event.severity));
+    try json.objectField("message");
+    try json.write(event.message);
+    try json.endObject();
+}
+
+fn writeTelemetryTrace(json: *std.json.Stringify, span: telemetry.TraceSpan) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    try json.write(span.id);
+    try json.objectField("source");
+    try json.write(span.source);
+    try json.objectField("trace_id");
+    try json.write(span.trace_id);
+    try json.objectField("span_id");
+    try json.write(span.span_id);
+    try json.objectField("parent_span_id");
+    try json.write(span.parent_span_id);
+    try json.objectField("name");
+    try json.write(span.name);
+    try json.objectField("kind");
+    try json.write(telemetry.spanKindName(span.kind));
+    try json.objectField("start_time_ns");
+    try json.write(span.start_time_ns);
+    try json.objectField("end_time_ns");
+    try json.write(span.end_time_ns);
+    try json.objectField("status");
+    try json.write(telemetry.spanStatusName(span.status));
+    try json.endObject();
+}
+
+fn writeTelemetryMetric(json: *std.json.Stringify, metric: telemetry.Metric) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    try json.write(metric.id);
+    try json.objectField("timestamp_ns");
+    try json.write(metric.timestamp_ns);
+    try json.objectField("source");
+    try json.write(metric.source);
+    try json.objectField("name");
+    try json.write(metric.name);
+    try json.objectField("value");
+    try json.write(metric.value);
+    try json.objectField("unit");
+    try json.write(metric.unit);
+    try json.endObject();
 }
 
 fn workloadLoadFailureJson(
@@ -1751,11 +2697,47 @@ pub fn capabilitiesJson(allocator: std.mem.Allocator, config: Config) ![]u8 {
     try json.objectField("network");
     try writeNetworkCapabilities(&json, profile.network);
 
+    try json.objectField("gpu");
+    try writeGpuCapabilities(&json, config.gpu);
+
+    try json.objectField("telemetry");
+    try writeTelemetryCapabilities(&json);
+
     try json.objectField("policy");
     try writeRuntimePolicy(&json, config.policy);
 
     try json.endObject();
     return try out.toOwnedSlice();
+}
+
+fn writeGpuCapabilities(json: *std.json.Stringify, caps: gpu.Capabilities) !void {
+    try json.beginObject();
+    try json.objectField("enabled");
+    try json.write(caps.enabled);
+    try json.objectField("device_count");
+    try json.write(caps.deviceCount());
+
+    try json.objectField("devices");
+    try json.beginArray();
+    if (caps.enabled) {
+        for (caps.devices, 0..) |device, index| {
+            try json.beginObject();
+            try json.objectField("index");
+            try json.write(index);
+            try json.objectField("kind");
+            try json.write(gpu.deviceKindName(device.kind));
+            try json.objectField("total_memory_bytes");
+            try json.write(device.total_memory_bytes);
+            try json.objectField("available_memory_bytes");
+            try json.write(device.available_memory_bytes);
+            try json.objectField("queue_count");
+            try json.write(device.queue_count);
+            try json.endObject();
+        }
+    }
+    try json.endArray();
+
+    try json.endObject();
 }
 
 fn writeRuntimePolicy(json: *std.json.Stringify, policy: RuntimePolicy) !void {
@@ -1772,6 +2754,46 @@ fn writeRuntimePolicy(json: *std.json.Stringify, policy: RuntimePolicy) !void {
     try json.write(policy.max_stderr_bytes);
     try json.objectField("max_invoke_duration_ns");
     try json.write(policy.max_invoke_duration_ns);
+    try json.endObject();
+}
+
+fn writeTelemetryCapabilities(json: *std.json.Stringify) !void {
+    try json.beginObject();
+    try json.objectField("events");
+    try json.write(true);
+    try json.objectField("metrics");
+    try json.write(true);
+    try json.objectField("traces");
+    try json.write(true);
+    try json.objectField("storage");
+    try json.write("memory");
+    try json.objectField("opentelemetry");
+    try json.beginObject();
+    try json.objectField("otlp_http_json");
+    try json.write(true);
+    try json.objectField("logs_path");
+    try json.write("/v1/logs");
+    try json.objectField("metrics_path");
+    try json.write("/v1/metrics");
+    try json.objectField("traces_path");
+    try json.write("/v1/traces");
+    try json.endObject();
+    try json.objectField("endpoints");
+    try json.beginArray();
+    try json.write("GET /telemetry");
+    try json.write("GET /telemetry/events");
+    try json.write("GET /telemetry/metrics");
+    try json.write("GET /telemetry/traces");
+    try json.write("GET /telemetry/otlp/logs");
+    try json.write("GET /telemetry/otlp/metrics");
+    try json.write("GET /telemetry/otlp/traces");
+    try json.write("POST /telemetry/events");
+    try json.write("POST /telemetry/metrics");
+    try json.write("POST /telemetry/traces");
+    try json.write("POST /v1/logs");
+    try json.write("POST /v1/metrics");
+    try json.write("POST /v1/traces");
+    try json.endArray();
     try json.endObject();
 }
 
@@ -1884,9 +2906,19 @@ fn dtypeName(dtype: target_profile.DType) []const u8 {
 }
 
 test "agent capabilities JSON exposes profile resources and networking" {
+    const gpu_devices = [_]gpu.Device{.{
+        .kind = .integrated,
+        .total_memory_bytes = 1024,
+        .available_memory_bytes = 512,
+        .queue_count = 1,
+    }};
     const body = try capabilitiesJson(std.testing.allocator, .{
         .node_id = "edge-a",
         .profile_name = "vision-f32-basic",
+        .gpu = .{
+            .enabled = true,
+            .devices = &gpu_devices,
+        },
     });
     defer std.testing.allocator.free(body);
 
@@ -1896,6 +2928,11 @@ test "agent capabilities JSON exposes profile resources and networking" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tcp\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"policy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"max_invoke_args\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"device_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"integrated\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"telemetry\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"POST /telemetry/events\"") != null);
 }
 
 test "agent HTTP responses route health capabilities and not found" {
@@ -2007,6 +3044,179 @@ test "agent workload registry lists registered workloads" {
     try std.testing.expect(std.mem.indexOf(u8, response, "\"path\":\"workloads/demo\"") != null);
 }
 
+test "agent records telemetry events and metrics" {
+    var state = State{};
+    defer state.deinit(std.testing.allocator);
+
+    const event_response = try responseForRequestWithState(
+        std.testing.allocator,
+        "POST /telemetry/events HTTP/1.1\r\nhost: local\r\n\r\n{\"source\":\"camera\",\"kind\":\"frame_drop\",\"severity\":\"warn\",\"message\":\"dropped frame\"}",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(event_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, event_response, "\"kind\":\"telemetry_event\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, event_response, "\"accepted\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.events.items.len);
+    try std.testing.expectEqualStrings("frame_drop", state.telemetry_store.events.items[0].kind);
+    try std.testing.expectEqual(telemetry.Severity.warn, state.telemetry_store.events.items[0].severity);
+
+    const metric_response = try responseForRequestWithState(
+        std.testing.allocator,
+        "POST /telemetry/metrics HTTP/1.1\r\nhost: local\r\n\r\n{\"source\":\"runtime\",\"name\":\"latency_ms\",\"value\":14.5,\"unit\":\"ms\"}",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(metric_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, metric_response, "\"kind\":\"telemetry_metric\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.metrics.items.len);
+    try std.testing.expectEqualStrings("latency_ms", state.telemetry_store.metrics.items[0].name);
+    try std.testing.expectEqual(@as(f64, 14.5), state.telemetry_store.metrics.items[0].value);
+
+    const telemetry_response = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /telemetry HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(telemetry_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, telemetry_response, "\"events\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, telemetry_response, "\"metrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, telemetry_response, "\"frame_drop\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, telemetry_response, "\"latency_ms\"") != null);
+}
+
+test "agent records local telemetry traces" {
+    var state = State{};
+    defer state.deinit(std.testing.allocator);
+
+    const response = try responseForRequestWithState(
+        std.testing.allocator,
+        "POST /telemetry/traces HTTP/1.1\r\nhost: local\r\n\r\n{\"source\":\"runtime\",\"trace_id\":\"5b8efff798038103d269b633813fc60c\",\"span_id\":\"eee19b7ec3c1b174\",\"name\":\"invoke\",\"kind\":\"server\",\"start_time_ns\":100,\"end_time_ns\":150,\"status\":\"ok\"}",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"kind\":\"telemetry_trace\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.traces.items.len);
+    try std.testing.expectEqualStrings("invoke", state.telemetry_store.traces.items[0].name);
+    try std.testing.expectEqual(telemetry.SpanKind.server, state.telemetry_store.traces.items[0].kind);
+    try std.testing.expectEqual(telemetry.SpanStatus.ok, state.telemetry_store.traces.items[0].status);
+
+    const traces_response = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /telemetry/traces HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(traces_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, traces_response, "\"trace_id\":\"5b8efff798038103d269b633813fc60c\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, traces_response, "\"kind\":\"server\"") != null);
+}
+
+test "agent ingests and exports OTLP HTTP JSON telemetry" {
+    var state = State{};
+    defer state.deinit(std.testing.allocator);
+
+    const logs_request =
+        \\POST /v1/logs HTTP/1.1
+        \\host: local
+        \\
+        \\{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"edge-camera"}}]},"scopeLogs":[{"scope":{"name":"demo"},"logRecords":[{"timeUnixNano":"123","severityText":"WARN","body":{"stringValue":"frame dropped"},"attributes":[{"key":"event.name","value":{"stringValue":"frame_drop"}}]}]}]}]}
+    ;
+    const logs_response = try responseForRequestWithState(
+        std.testing.allocator,
+        logs_request,
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(logs_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, logs_response, "HTTP/1.1 200 OK") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.events.items.len);
+    try std.testing.expectEqualStrings("edge-camera", state.telemetry_store.events.items[0].source);
+    try std.testing.expectEqualStrings("frame_drop", state.telemetry_store.events.items[0].kind);
+    try std.testing.expectEqual(telemetry.Severity.warn, state.telemetry_store.events.items[0].severity);
+
+    const metrics_request =
+        \\POST /v1/metrics HTTP/1.1
+        \\host: local
+        \\
+        \\{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"edge-runtime"}}]},"scopeMetrics":[{"scope":{"name":"demo"},"metrics":[{"name":"latency_ms","unit":"ms","gauge":{"dataPoints":[{"timeUnixNano":"124","asDouble":14.5}]}}]}]}]}
+    ;
+    const metrics_response = try responseForRequestWithState(
+        std.testing.allocator,
+        metrics_request,
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(metrics_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, metrics_response, "HTTP/1.1 200 OK") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.metrics.items.len);
+    try std.testing.expectEqualStrings("edge-runtime", state.telemetry_store.metrics.items[0].source);
+    try std.testing.expectEqualStrings("latency_ms", state.telemetry_store.metrics.items[0].name);
+
+    const otlp_logs = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /telemetry/otlp/logs HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{ .node_id = "edge-a" },
+        &state,
+    );
+    defer std.testing.allocator.free(otlp_logs);
+
+    try std.testing.expect(std.mem.indexOf(u8, otlp_logs, "\"resourceLogs\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, otlp_logs, "\"service.instance.id\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, otlp_logs, "\"frame dropped\"") != null);
+
+    const otlp_metrics = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /telemetry/otlp/metrics HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{ .node_id = "edge-a" },
+        &state,
+    );
+    defer std.testing.allocator.free(otlp_metrics);
+
+    try std.testing.expect(std.mem.indexOf(u8, otlp_metrics, "\"resourceMetrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, otlp_metrics, "\"latency_ms\"") != null);
+
+    const traces_request =
+        \\POST /v1/traces HTTP/1.1
+        \\host: local
+        \\
+        \\{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"edge-runtime"}}]},"scopeSpans":[{"scope":{"name":"demo"},"spans":[{"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174","name":"invoke","kind":2,"startTimeUnixNano":"125","endTimeUnixNano":"175","status":{"code":1}}]}]}]}
+    ;
+    const traces_response = try responseForRequestWithState(
+        std.testing.allocator,
+        traces_request,
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(traces_response);
+
+    try std.testing.expect(std.mem.indexOf(u8, traces_response, "HTTP/1.1 200 OK") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.telemetry_store.traces.items.len);
+    try std.testing.expectEqualStrings("edge-runtime", state.telemetry_store.traces.items[0].source);
+    try std.testing.expectEqualStrings("invoke", state.telemetry_store.traces.items[0].name);
+    try std.testing.expectEqual(telemetry.SpanKind.server, state.telemetry_store.traces.items[0].kind);
+
+    const otlp_traces = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /telemetry/otlp/traces HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{ .node_id = "edge-a" },
+        &state,
+    );
+    defer std.testing.allocator.free(otlp_traces);
+
+    try std.testing.expect(std.mem.indexOf(u8, otlp_traces, "\"resourceSpans\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, otlp_traces, "\"traceId\":\"5b8efff798038103d269b633813fc60c\"") != null);
+}
+
 test "agent workload invoke reports missing workload" {
     var state = State{};
     defer state.deinit(std.testing.allocator);
@@ -2042,6 +3252,37 @@ test "agent parses invoke args and stdin" {
     defer empty.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty.args.len);
     try std.testing.expectEqualStrings("", empty.stdin);
+}
+
+test "agent parses telemetry payloads" {
+    const event = try parseTelemetryEventRequest(
+        \\{"kind":"safety_stop","message":"manual stop","severity":"error"}
+    ,
+        .{},
+    );
+    try std.testing.expectEqualStrings("agent", event.source);
+    try std.testing.expectEqualStrings("safety_stop", event.kind);
+    try std.testing.expectEqual(telemetry.Severity.err, event.severity);
+
+    const metric = try parseTelemetryMetricRequest(
+        \\{"source":"gpu","name":"temperature_c","value":61.25,"unit":"celsius"}
+    ,
+        .{},
+    );
+    try std.testing.expectEqualStrings("gpu", metric.source);
+    try std.testing.expectEqualStrings("temperature_c", metric.name);
+    try std.testing.expectEqual(@as(f64, 61.25), metric.value);
+    try std.testing.expectEqualStrings("celsius", metric.unit);
+
+    const trace = try parseTelemetryTraceRequest(
+        \\{"trace_id":"5b8efff798038103d269b633813fc60c","span_id":"eee19b7ec3c1b174","name":"invoke","kind":"client","start_time_ns":1,"end_time_ns":2,"status":"ok"}
+    ,
+        .{},
+    );
+    try std.testing.expectEqualStrings("agent", trace.source);
+    try std.testing.expectEqualStrings("invoke", trace.name);
+    try std.testing.expectEqual(telemetry.SpanKind.client, trace.kind);
+    try std.testing.expectEqual(telemetry.SpanStatus.ok, trace.status);
 }
 
 test "agent runtime policy rejects oversized invoke inputs" {
