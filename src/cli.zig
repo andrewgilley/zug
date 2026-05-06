@@ -7,9 +7,11 @@ const capabilities = @import("capabilities.zig");
 const benchmark = @import("benchmark.zig");
 const check = @import("check.zig");
 const agent = @import("agent.zig");
+const accelerator = @import("accelerator.zig");
 const gpu = @import("gpu.zig");
 const scope = @import("scope.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
+const workload_runner = @import("workload_runner.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
 const wasm_compatibility = @import("wasm/compatibility.zig");
 const wasm_imports = @import("wasm/imports.zig");
@@ -24,6 +26,7 @@ const default_wasm_memory_bytes: usize = 16 * 1024 * 1024;
 
 const CliMode = enum {
     run,
+    workload,
     check,
     inspect,
     scope,
@@ -65,6 +68,8 @@ const CliArgs = struct {
     agent_profile_name: ?[]const u8 = null,
     agent_listen: ?[]const u8 = null,
     agent_once: bool = false,
+    run_profile_name: ?[]const u8 = null,
+    wasm_stdin: ?[]const u8 = null,
     mock_gpu: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
@@ -86,6 +91,12 @@ const CliArgs = struct {
         }
         if (self.agent_listen) |listen| {
             allocator.free(listen);
+        }
+        if (self.run_profile_name) |profile_name| {
+            allocator.free(profile_name);
+        }
+        if (self.wasm_stdin) |stdin| {
+            allocator.free(stdin);
         }
 
         for (self.inputs.items) |input| {
@@ -145,12 +156,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .listen = cli.agent_listen orelse "127.0.0.1:7070",
             .once = cli.agent_once,
             .gpu = if (cli.mock_gpu) gpu.mockEdgeCapabilities() else .{},
+            .accelerators = if (cli.mock_gpu) accelerator.mockEdgeCapabilities() else accelerator.defaultCapabilities(),
         });
         return;
     }
 
     if (cli.mode == .wasm) {
         try runWasmModule(allocator, &cli);
+        return;
+    }
+
+    if (cli.mode == .workload) {
+        try runWorkload(allocator, &cli);
         return;
     }
 
@@ -212,6 +229,72 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
         printUsage();
         return error.MissingModelPath;
     };
+
+    if (std.mem.eql(u8, first_arg, "run")) {
+        const workload_arg = args.next() orelse {
+            printUsage();
+            return error.MissingWorkloadPath;
+        };
+
+        var cli = CliArgs{
+            .mode = .workload,
+            .model_path = try allocator.dupe(u8, workload_arg),
+        };
+        errdefer cli.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--arg")) {
+                const value = args.next() orelse {
+                    printUsage();
+                    return error.MissingWasmArgument;
+                };
+
+                try cli.wasm_args.append(allocator, try parseWasmI32Arg(value));
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--stdin")) {
+                const value = args.next() orelse {
+                    printUsage();
+                    return error.MissingWasmStdin;
+                };
+
+                if (cli.wasm_stdin) |old_stdin| {
+                    allocator.free(old_stdin);
+                }
+                cli.wasm_stdin = try allocator.dupe(u8, value);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--profile")) {
+                const profile_name = args.next() orelse {
+                    printUsage();
+                    return error.MissingRunProfile;
+                };
+
+                if (cli.run_profile_name) |old_profile_name| {
+                    allocator.free(old_profile_name);
+                }
+                cli.run_profile_name = try allocator.dupe(u8, profile_name);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--json")) {
+                cli.check_output_format = .json;
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--mock-gpu")) {
+                cli.mock_gpu = true;
+                continue;
+            }
+
+            printUsage();
+            return error.UnknownArgument;
+        }
+
+        return cli;
+    }
 
     if (std.mem.eql(u8, first_arg, "inspect")) {
         const model_arg = args.next() orelse {
@@ -645,6 +728,7 @@ fn printUsage() void {
         \\usage:
         \\  zug scope
         \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once] [--mock-gpu]
+        \\  zug run <workload/> [--profile profile] [--arg i32] [--stdin text] [--json] [--mock-gpu]
         \\  zug check <file.onnx|file.wasm|workload/> [--kind auto|onnx|wasm|workload] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
         \\  zug bench <model.onnx> --input name=file.f32 [--warmup count] [--iterations count] [--format text|json] [--trace]
@@ -659,11 +743,19 @@ fn printUsage() void {
         \\  --tolerance sets max absolute difference for float32 expectations
         \\  bench uses a non-debug counting allocator and reports timing plus allocation pressure
         \\
+        \\workload:
+        \\  run is the central local workflow for a WASM guest plus model package
+        \\  --profile overrides the manifest target profile for local execution
+        \\  --arg passes an i32 argument to the configured workload entrypoint
+        \\  --stdin provides guest stdin bytes through WASI fd_read
+        \\  --json emits machine-readable execution output
+        \\  --mock-gpu enables a host mock GPU device and mock accelerator backend catalog
+        \\
         \\wasm:
         \\  --manifest checks runtime requirements before execution
         \\  --model exposes a host-managed model to zug_nn.load_preloaded_graph
         \\  --model-offset also writes that model into guest memory for legacy guests
-        \\  --mock-gpu enables a host mock GPU device for exercising the zug_gpu resource ABI
+        \\  --mock-gpu enables a host mock GPU device and mock accelerator backend catalog
         \\
         \\agent:
         \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads, GET /telemetry over HTTP
@@ -675,7 +767,7 @@ fn printUsage() void {
         \\  POST /telemetry/traces records a local trace span
         \\  POST /v1/logs, POST /v1/metrics and POST /v1/traces accept OTLP/HTTP JSON from OpenTelemetry clients
         \\  --once accepts one TCP request and then exits
-        \\  --mock-gpu advertises a mock integrated GPU device to deployed WASM workloads
+        \\  --mock-gpu advertises a mock integrated GPU device and accelerator backends to deployed WASM workloads
         \\
     , .{});
 }
@@ -1054,6 +1146,154 @@ fn printJsonString(value: []const u8) void {
     std.debug.print("\"", .{});
 }
 
+fn runWorkload(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
+    var result = try workload_runner.run(allocator, .{
+        .path = cli.model_path,
+        .profile_name = cli.run_profile_name,
+        .args = cli.wasm_args.items,
+        .stdin = cli.wasm_stdin orelse &.{},
+        .gpu = if (cli.mock_gpu) gpu.mockEdgeCapabilities() else .{},
+        .accelerators = if (cli.mock_gpu) accelerator.mockEdgeCapabilities() else accelerator.defaultCapabilities(),
+    });
+    defer result.deinit(allocator);
+
+    switch (cli.check_output_format) {
+        .text => printWorkloadRunText(result),
+        .json => try printWorkloadRunJson(allocator, result),
+    }
+}
+
+fn printWorkloadRunText(result: workload_runner.Result) void {
+    std.debug.print("zug run workload\n", .{});
+    std.debug.print("  path: {s}\n", .{result.path});
+    std.debug.print("  name: {s}\n", .{result.name});
+    std.debug.print("  profile: {s}\n", .{result.profile});
+    std.debug.print("  entrypoint: {s}\n", .{result.entrypoint});
+    std.debug.print("  wasm: {s} ({d} bytes)\n", .{ result.wasm_path, result.wasm_bytes });
+    if (result.model_path.len != 0) {
+        std.debug.print("  model: {s} ({d} bytes)\n", .{ result.model_path, result.model_bytes });
+    } else {
+        std.debug.print("  model: <none>\n", .{});
+    }
+    std.debug.print("  memory_bytes: {d}\n", .{result.memory_bytes});
+    std.debug.print("  duration_ns: {d}\n", .{result.duration_ns});
+
+    if (result.stdout.len != 0) {
+        std.debug.print("stdout:\n{s}", .{result.stdout});
+        if (result.stdout[result.stdout.len - 1] != '\n') std.debug.print("\n", .{});
+    }
+    if (result.stderr.len != 0) {
+        std.debug.print("stderr:\n{s}", .{result.stderr});
+        if (result.stderr[result.stderr.len - 1] != '\n') std.debug.print("\n", .{});
+    }
+    if (result.exit_code) |exit_code| {
+        std.debug.print("wasm exit: {d}\n", .{exit_code});
+    }
+
+    printNamedWasmResult("workload result", result.value);
+}
+
+fn printWorkloadRunJson(allocator: std.mem.Allocator, result: workload_runner.Result) !void {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("workload_run");
+    try json.objectField("status");
+    try json.write("completed");
+    try json.objectField("path");
+    try json.write(result.path);
+    try json.objectField("name");
+    try json.write(result.name);
+    try json.objectField("profile");
+    try json.write(result.profile);
+    try json.objectField("entrypoint");
+    try json.write(result.entrypoint);
+    try json.objectField("wasm");
+    try json.write(result.wasm_path);
+    try json.objectField("wasm_bytes");
+    try json.write(result.wasm_bytes);
+    try json.objectField("model");
+    try json.write(result.model_path);
+    try json.objectField("model_bytes");
+    try json.write(result.model_bytes);
+    try json.objectField("memory_bytes");
+    try json.write(result.memory_bytes);
+    try json.objectField("duration_ns");
+    try json.write(result.duration_ns);
+    try json.objectField("exit_code_present");
+    try json.write(result.exit_code != null);
+    try json.objectField("exit_code");
+    try json.write(result.exit_code orelse 0);
+    try json.objectField("stdout");
+    try json.write(result.stdout);
+    try json.objectField("stderr");
+    try json.write(result.stderr);
+    try json.objectField("result");
+    try writeWasmValueJson(&json, result.value);
+    try json.endObject();
+
+    const body = try out.toOwnedSlice();
+    defer allocator.free(body);
+    std.debug.print("{s}\n", .{body});
+}
+
+fn writeWasmValueJson(json: *std.json.Stringify, value: ?wasm_interpreter.Value) !void {
+    try json.beginObject();
+    if (value) |actual| {
+        switch (actual) {
+            .i32 => |payload| {
+                try json.objectField("type");
+                try json.write("i32");
+                try json.objectField("value");
+                try json.write(@as(i32, @bitCast(payload)));
+            },
+            .i64 => |payload| {
+                try json.objectField("type");
+                try json.write("i64");
+                try json.objectField("value");
+                try json.write(@as(i64, @bitCast(payload)));
+            },
+            .f32 => |payload| {
+                try json.objectField("type");
+                try json.write("f32");
+                try json.objectField("value");
+                try json.write(payload);
+            },
+            .f64 => |payload| {
+                try json.objectField("type");
+                try json.write("f64");
+                try json.objectField("value");
+                try json.write(payload);
+            },
+            .funcref => |payload| {
+                try json.objectField("type");
+                try json.write("funcref");
+                try json.objectField("value");
+                try json.write(payload orelse 0);
+                try json.objectField("null");
+                try json.write(payload == null);
+            },
+            .v128 => |payload| {
+                try json.objectField("type");
+                try json.write("v128");
+                try json.objectField("bytes");
+                try json.beginArray();
+                for (payload) |byte| {
+                    try json.write(byte);
+                }
+                try json.endArray();
+            },
+        }
+    } else {
+        try json.objectField("type");
+        try json.write("none");
+    }
+    try json.endObject();
+}
+
 fn runWasmModule(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         std.Options.debug_io,
@@ -1140,7 +1380,10 @@ fn runWasmModule(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
         }
     }
 
-    var host = wasi_nn_abi.Host.init(allocator);
+    var host = wasi_nn_abi.Host.initWithAccelerators(
+        allocator,
+        if (cli.mock_gpu) accelerator.mockEdgeCapabilities() else accelerator.defaultCapabilities(),
+    );
     defer host.deinit();
 
     var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
@@ -1222,7 +1465,11 @@ fn alignToWasmPage(value: usize) !usize {
 }
 
 fn printWasmResult(result: ?wasm_interpreter.Value) void {
-    std.debug.print("wasm result: ", .{});
+    printNamedWasmResult("wasm result", result);
+}
+
+fn printNamedWasmResult(label: []const u8, result: ?wasm_interpreter.Value) void {
+    std.debug.print("{s}: ", .{label});
 
     if (result) |value| {
         switch (value) {

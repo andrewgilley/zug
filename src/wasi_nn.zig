@@ -1,4 +1,5 @@
 const std = @import("std");
+const accelerator = @import("accelerator.zig");
 const session = @import("session.zig");
 const tensor = @import("tensor.zig");
 
@@ -10,6 +11,19 @@ pub const GraphEncoding = enum {
 
 pub const ExecutionTarget = enum {
     cpu,
+    gpu,
+    tpu,
+    cuda,
+    tensorrt,
+    rocm,
+    vulkan,
+    metal,
+    directml,
+    openvino,
+    coreml,
+    nnapi,
+    webgpu,
+    edge_tpu,
 };
 
 pub const GraphHandle = struct {
@@ -33,6 +47,7 @@ pub const TensorDescriptor = struct {
 const Graph = struct {
     encoding: GraphEncoding,
     target: ExecutionTarget,
+    backend: accelerator.BackendKind,
     model_bytes: []u8,
 
     fn deinit(self: *Graph, allocator: std.mem.Allocator) void {
@@ -53,12 +68,23 @@ const ExecutionContext = struct {
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
+    accelerators: accelerator.Capabilities = accelerator.defaultCapabilities(),
     graphs: std.ArrayList(*Graph) = .empty,
     contexts: std.ArrayList(*ExecutionContext) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Host {
         return .{
             .allocator = allocator,
+        };
+    }
+
+    pub fn initWithAccelerators(
+        allocator: std.mem.Allocator,
+        accelerators: accelerator.Capabilities,
+    ) Host {
+        return .{
+            .allocator = allocator,
+            .accelerators = accelerators,
         };
     }
 
@@ -85,7 +111,7 @@ pub const Host = struct {
         model_bytes: []const u8,
     ) !GraphHandle {
         if (encoding != .onnx) return error.UnsupportedGraphEncoding;
-        if (target != .cpu) return error.UnsupportedExecutionTarget;
+        const backend = try self.resolveExecutionBackend(target);
         if (model_bytes.len > max_model_bytes) return error.ModelTooLarge;
 
         var validated = try session.loadOnnxFromBytes(self.allocator, model_bytes);
@@ -100,6 +126,7 @@ pub const Host = struct {
         graph.* = .{
             .encoding = encoding,
             .target = target,
+            .backend = backend,
             .model_bytes = owned_model_bytes,
         };
         errdefer graph.deinit(self.allocator);
@@ -219,10 +246,70 @@ pub const Host = struct {
         if (handle.index >= self.contexts.items.len) return error.InvalidExecutionContextHandle;
         return self.contexts.items[handle.index];
     }
+
+    fn resolveExecutionBackend(self: Host, target: ExecutionTarget) !accelerator.BackendKind {
+        const backend = switch (target) {
+            .cpu => accelerator.BackendKind.cpu,
+            .gpu => self.accelerators.defaultGpuBackend() orelse return error.UnsupportedExecutionTarget,
+            .tpu => accelerator.BackendKind.edge_tpu,
+            .cuda => accelerator.BackendKind.cuda,
+            .tensorrt => accelerator.BackendKind.tensorrt,
+            .rocm => accelerator.BackendKind.rocm,
+            .vulkan => accelerator.BackendKind.vulkan,
+            .metal => accelerator.BackendKind.metal,
+            .directml => accelerator.BackendKind.directml,
+            .openvino => accelerator.BackendKind.openvino,
+            .coreml => accelerator.BackendKind.coreml,
+            .nnapi => accelerator.BackendKind.nnapi,
+            .webgpu => accelerator.BackendKind.webgpu,
+            .edge_tpu => accelerator.BackendKind.edge_tpu,
+        };
+
+        if (!self.accelerators.supportsGraphExecution(backend)) {
+            return error.UnsupportedExecutionTarget;
+        }
+
+        return backend;
+    }
 };
 
 fn requireFloat32(value: *const tensor.Tensor) !void {
     _ = try value.float32Data();
+}
+
+test "host rejects unavailable accelerator graph targets" {
+    const allocator = std.testing.allocator;
+
+    const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        "models/tiny_mnist.onnx",
+        allocator,
+        .limited(max_model_bytes),
+    );
+    defer allocator.free(model_bytes);
+
+    var host = Host.init(allocator);
+    defer host.deinit();
+
+    try std.testing.expectError(error.UnsupportedExecutionTarget, host.loadGraph(.onnx, .cuda, model_bytes));
+}
+
+test "host accepts mock accelerator graph target through backend catalog" {
+    const allocator = std.testing.allocator;
+
+    const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        "models/tiny_mnist.onnx",
+        allocator,
+        .limited(max_model_bytes),
+    );
+    defer allocator.free(model_bytes);
+
+    var host = Host.initWithAccelerators(allocator, accelerator.mockEdgeCapabilities());
+    defer host.deinit();
+
+    const graph = try host.loadGraph(.onnx, .gpu, model_bytes);
+    try std.testing.expectEqual(@as(usize, 0), graph.index);
 }
 
 test "host runs onnx graph through wasi-nn shaped calls" {

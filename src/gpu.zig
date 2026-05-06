@@ -1,4 +1,5 @@
 const std = @import("std");
+const accelerator = @import("accelerator.zig");
 
 pub const DeviceKind = enum(u32) {
     unknown = 0,
@@ -10,6 +11,7 @@ pub const DeviceKind = enum(u32) {
 
 pub const Device = struct {
     kind: DeviceKind = .unknown,
+    backend: accelerator.BackendKind = .webgpu,
     total_memory_bytes: u64 = 0,
     available_memory_bytes: u64 = 0,
     queue_count: u32 = 1,
@@ -39,6 +41,7 @@ pub const Capabilities = struct {
 
 pub const mock_edge_devices = [_]Device{.{
     .kind = .integrated,
+    .backend = .vulkan,
     .total_memory_bytes = 512 * 1024 * 1024,
     .available_memory_bytes = 384 * 1024 * 1024,
     .queue_count = 1,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const accelerator = @import("accelerator.zig");
 const capabilities = @import("capabilities.zig");
 const gpu = @import("gpu.zig");
 const network = @import("network.zig");
@@ -22,6 +23,7 @@ pub const Config = struct {
     once: bool = false,
     policy: RuntimePolicy = .{},
     gpu: gpu.Capabilities = .{},
+    accelerators: accelerator.Capabilities = accelerator.defaultCapabilities(),
 };
 
 pub const RuntimePolicy = struct {
@@ -503,7 +505,7 @@ pub fn responseForRequestWithState(
             };
             defer invoke_request.deinit(allocator);
 
-            const body = try workloadInvokeJson(allocator, workload_id, invoke_request, config.policy, config.gpu, state);
+            const body = try workloadInvokeJson(allocator, workload_id, invoke_request, config.policy, config.gpu, config.accelerators, state);
             defer allocator.free(body);
             return jsonResponse(allocator, .ok, body);
         } else |err| switch (err) {
@@ -1304,13 +1306,14 @@ fn workloadInvokeJson(
     request: InvokeRequest,
     policy: RuntimePolicy,
     gpu_caps: gpu.Capabilities,
+    accelerator_caps: accelerator.Capabilities,
     state: *State,
 ) ![]u8 {
     const registered = state.findWorkloadById(workload_id) orelse {
         return workloadInvokeMissingJson(allocator, workload_id);
     };
 
-    var result = executeRegisteredWorkload(allocator, registered.*, request, policy, gpu_caps) catch |err| {
+    var result = executeRegisteredWorkload(allocator, registered.*, request, policy, gpu_caps, accelerator_caps) catch |err| {
         registered.status = .failed;
         try registered.setLastError(allocator, @errorName(err));
         const activity_id = try state.record(allocator, .workload_invoke, .failed, registered.path, @errorName(err));
@@ -1333,6 +1336,7 @@ fn executeRegisteredWorkload(
     request: InvokeRequest,
     policy: RuntimePolicy,
     gpu_caps: gpu.Capabilities,
+    accelerator_caps: accelerator.Capabilities,
 ) !InvokeResult {
     const started_ns = monotonicNowNs();
 
@@ -1372,7 +1376,7 @@ fn executeRegisteredWorkload(
     var wasm_instance = try runtime.instantiate(&parsed, registered.memory_bytes);
     defer wasm_instance.deinit();
 
-    var host = wasi_nn_abi.Host.init(allocator);
+    var host = wasi_nn_abi.Host.initWithAccelerators(allocator, accelerator_caps);
     defer host.deinit();
 
     var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
@@ -2700,6 +2704,9 @@ pub fn capabilitiesJson(allocator: std.mem.Allocator, config: Config) ![]u8 {
     try json.objectField("gpu");
     try writeGpuCapabilities(&json, config.gpu);
 
+    try json.objectField("accelerators");
+    try writeAcceleratorCapabilities(&json, config.accelerators);
+
     try json.objectField("telemetry");
     try writeTelemetryCapabilities(&json);
 
@@ -2726,6 +2733,8 @@ fn writeGpuCapabilities(json: *std.json.Stringify, caps: gpu.Capabilities) !void
             try json.write(index);
             try json.objectField("kind");
             try json.write(gpu.deviceKindName(device.kind));
+            try json.objectField("backend");
+            try json.write(accelerator.backendKindName(device.backend));
             try json.objectField("total_memory_bytes");
             try json.write(device.total_memory_bytes);
             try json.objectField("available_memory_bytes");
@@ -2737,6 +2746,43 @@ fn writeGpuCapabilities(json: *std.json.Stringify, caps: gpu.Capabilities) !void
     }
     try json.endArray();
 
+    try json.endObject();
+}
+
+fn writeAcceleratorCapabilities(json: *std.json.Stringify, caps: accelerator.Capabilities) !void {
+    try json.beginObject();
+    try json.objectField("backends");
+    try json.beginArray();
+    for (caps.backends) |backend| {
+        try json.beginObject();
+        try json.objectField("kind");
+        try json.write(accelerator.backendKindName(backend.kind));
+        try json.objectField("status");
+        try json.write(accelerator.backendStatusName(backend.status));
+        try json.objectField("device_count");
+        try json.write(backend.device_count);
+        try json.objectField("total_memory_bytes");
+        try json.write(backend.total_memory_bytes);
+        try json.objectField("available_memory_bytes");
+        try json.write(backend.available_memory_bytes);
+        try json.objectField("graph_execution");
+        try json.write(backend.supportsGraphExecution());
+        try json.objectField("features");
+        try json.beginArray();
+        for (backend.features) |feature| {
+            try json.write(accelerator.featureName(feature));
+        }
+        try json.endArray();
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("default_gpu_backend");
+    if (caps.defaultGpuBackend()) |backend| {
+        try json.write(accelerator.backendKindName(backend));
+    } else {
+        try json.write("");
+    }
     try json.endObject();
 }
 
@@ -2912,6 +2958,7 @@ test "agent capabilities JSON exposes profile resources and networking" {
         .available_memory_bytes = 512,
         .queue_count = 1,
     }};
+
     const body = try capabilitiesJson(std.testing.allocator, .{
         .node_id = "edge-a",
         .profile_name = "vision-f32-basic",
@@ -2931,6 +2978,9 @@ test "agent capabilities JSON exposes profile resources and networking" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"device_count\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"integrated\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"accelerators\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"kind\":\"cuda\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"planned\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"telemetry\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"POST /telemetry/events\"") != null);
 }
@@ -2942,6 +2992,7 @@ test "agent HTTP responses route health capabilities and not found" {
         .{ .node_id = "edge-a" },
     );
     defer std.testing.allocator.free(health);
+
     try std.testing.expect(std.mem.indexOf(u8, health, "HTTP/1.1 200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, health, "\"status\":\"ok\"") != null);
 

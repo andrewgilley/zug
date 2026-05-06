@@ -56,15 +56,10 @@ Implemented today:
 ```powershell
 zug check examples/workloads/tiny-mnist --kind workload
 zug check examples/workloads/tiny-mnist --kind workload --json
-```
-
-Still needed:
-
-```powershell
 zug run examples/workloads/tiny-mnist
 ```
 
-The run command should become the local equivalent of what an edge agent will eventually execute remotely.
+The run command is now the local equivalent of what an edge agent will eventually execute remotely.
 
 ## Runtime Responsibilities
 

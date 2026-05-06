@@ -30,6 +30,19 @@ pub const GraphEncoding = enum(u32) {
 
 pub const ExecutionTarget = enum(u32) {
     cpu = 0,
+    gpu = 1,
+    tpu = 2,
+    cuda = 100,
+    tensorrt = 101,
+    rocm = 102,
+    vulkan = 103,
+    metal = 104,
+    directml = 105,
+    openvino = 106,
+    coreml = 107,
+    nnapi = 108,
+    webgpu = 109,
+    edge_tpu = 110,
 };
 
 pub const DType = enum(u32) {
@@ -298,6 +311,19 @@ fn decodeGraphEncoding(value: u32) !wasi_nn.GraphEncoding {
 fn decodeExecutionTarget(value: u32) !wasi_nn.ExecutionTarget {
     return switch (value) {
         @intFromEnum(ExecutionTarget.cpu) => .cpu,
+        @intFromEnum(ExecutionTarget.gpu) => .gpu,
+        @intFromEnum(ExecutionTarget.tpu) => .tpu,
+        @intFromEnum(ExecutionTarget.cuda) => .cuda,
+        @intFromEnum(ExecutionTarget.tensorrt) => .tensorrt,
+        @intFromEnum(ExecutionTarget.rocm) => .rocm,
+        @intFromEnum(ExecutionTarget.vulkan) => .vulkan,
+        @intFromEnum(ExecutionTarget.metal) => .metal,
+        @intFromEnum(ExecutionTarget.directml) => .directml,
+        @intFromEnum(ExecutionTarget.openvino) => .openvino,
+        @intFromEnum(ExecutionTarget.coreml) => .coreml,
+        @intFromEnum(ExecutionTarget.nnapi) => .nnapi,
+        @intFromEnum(ExecutionTarget.webgpu) => .webgpu,
+        @intFromEnum(ExecutionTarget.edge_tpu) => .edge_tpu,
         else => error.InvalidExecutionTarget,
     };
 }

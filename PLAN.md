@@ -17,7 +17,7 @@ The goal is not to clone WasmEdge, WAMR, or ONNX Runtime in full. The goal is na
 
 Implemented project surfaces:
 
-- CLI commands for `scope`, `check`, `inspect`, `bench`, direct ONNX execution, direct WASM execution, and `agent`.
+- CLI commands for `scope`, `check`, `inspect`, `bench`, direct ONNX execution, direct WASM execution, local workload execution, and `agent`.
 - ONNX protobuf decoding through generated bindings.
 - A tensor representation with `float32`, `int64`, `int32`, `uint8`, and `bool` storage.
 - Direct ONNX graph execution through `Session` and `Executor`.
@@ -30,10 +30,10 @@ Implemented project surfaces:
 - WASI Preview 1 host support for args, environment, clock, random, fd stat, fd read/write, descriptor close/seek, preopen discovery, readonly directory iteration, readonly path stat/open, and process exit.
 - A WASI-NN shaped host and ABI surface for graph loading, execution context creation, input binding, compute, output descriptors, and output reads.
 - Guest WASM fixtures that exercise basic execution, WASI logging, and WASI-NN driven inference.
-- Workload manifests through `zug.toml`, target profiles, network requirements, and `zug check workload/`.
+- Workload manifests through `zug.toml`, target profiles, network requirements, `zug check workload/`, and `zug run workload/`.
 - A host-side `zug agent` that listens over TCP/HTTP and serves `/health` and `/capabilities`.
 
-The strongest proof point is that a WASM guest can drive ONNX inference through the stable host ABI path, and the project can also check whether a workload bundle is compatible with a target profile.
+The strongest proof point is that a WASM guest can drive ONNX inference through the stable host ABI path, and the project can now check and run a workload bundle against a target profile through one local workflow.
 
 ## ONNX Coverage
 
@@ -153,9 +153,9 @@ The agent is the first real networking surface. It is not yet a scheduler, deplo
 
 The highest-value next development slices are:
 
-1. Add `POST /workloads/check` to the agent so a remote caller can ask whether a workload is accepted by a node profile.
-2. Add a local `zug run workload/` path that loads the manifest, guest, model, WASI-NN surface, and runtime configuration from one directory.
-3. Add `POST /workloads/run` only after the local workload run path is stable.
+1. Add runtime telemetry spans and metrics around the local `zug run workload/` path.
+2. Add `POST /workloads/check` to the agent so a remote caller can ask whether a workload is accepted by a node profile.
+3. Add `POST /workloads/run` only after the local workload run path is stable under repeated tests.
 4. Expand WASI Preview 1 from readonly preopens into file write policy and guest HTTP capability mapping.
 5. Ingest official WASM spec tests for the supported instruction surface.
 6. Improve ONNX performance with execution planning, tensor slot indexing, scratch-buffer reuse, and optimized Conv variants.

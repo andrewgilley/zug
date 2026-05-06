@@ -102,6 +102,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const accelerator_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/accelerator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const check_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/check.zig"),
@@ -172,6 +180,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const workload_runner_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workload_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    workload_runner_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
     const wasi_nn_abi_module = b.createModule(.{
         .root_source_file = b.path("src/wasi_nn_abi.zig"),
         .target = target,
@@ -204,6 +222,7 @@ pub fn build(b: *std.Build) void {
     const run_wasi_nn_abi_tests = b.addRunArtifact(wasi_nn_abi_tests);
     const run_session_tests = b.addRunArtifact(session_tests);
     const run_benchmark_tests = b.addRunArtifact(benchmark_tests);
+    const run_accelerator_tests = b.addRunArtifact(accelerator_tests);
     const run_check_tests = b.addRunArtifact(check_tests);
     const run_scope_tests = b.addRunArtifact(scope_tests);
     const run_target_tests = b.addRunArtifact(target_tests);
@@ -212,6 +231,7 @@ pub fn build(b: *std.Build) void {
     const run_gpu_tests = b.addRunArtifact(gpu_tests);
     const run_agent_tests = b.addRunArtifact(agent_tests);
     const run_workload_tests = b.addRunArtifact(workload_tests);
+    const run_workload_runner_tests = b.addRunArtifact(workload_runner_tests);
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
     const run_deployment_tests = b.addRunArtifact(deployment_tests);
 
@@ -220,6 +240,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wasi_nn_abi_tests.step);
     test_step.dependOn(&run_session_tests.step);
     test_step.dependOn(&run_benchmark_tests.step);
+    test_step.dependOn(&run_accelerator_tests.step);
     test_step.dependOn(&run_check_tests.step);
     test_step.dependOn(&run_scope_tests.step);
     test_step.dependOn(&run_target_tests.step);
@@ -228,6 +249,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_gpu_tests.step);
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_workload_tests.step);
+    test_step.dependOn(&run_workload_runner_tests.step);
     test_step.dependOn(&run_wasm_tests.step);
     test_step.dependOn(&run_deployment_tests.step);
 
@@ -369,6 +391,13 @@ pub fn build(b: *std.Build) void {
 
     const check_workload_step = b.step("check-workload", "Check the example WASM plus ONNX workload package");
     check_workload_step.dependOn(&check_tiny_mnist_workload.step);
+
+    const run_tiny_mnist_workload = b.addRunArtifact(exe);
+    run_tiny_mnist_workload.addArgs(&.{ "run", "examples/workloads/tiny-mnist" });
+    run_tiny_mnist_workload.step.dependOn(&guest_wasi_nn_full.step);
+
+    const run_workload_step = b.step("run-workload", "Run the example WASM plus ONNX workload package");
+    run_workload_step.dependOn(&run_tiny_mnist_workload.step);
 
     const gen_proto = b.step("gen-proto", "generates zig files from protobuf definitions");
 

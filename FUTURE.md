@@ -15,7 +15,7 @@ The project now has the first versions of those pieces. The future work is to ha
 
 ### Milestone 1: Local Workload Execution
 
-Current state: workload manifests can be checked, but workload execution is still assembled through lower-level commands.
+Current state: workload manifests can be checked and executed locally through the central `zug run workload/` command.
 
 Target:
 
@@ -23,7 +23,7 @@ Target:
 zug run workload/
 ```
 
-Required work:
+Implemented work:
 
 - Load `zug.toml`.
 - Resolve the guest module and model paths.
@@ -34,7 +34,14 @@ Required work:
 - Call the configured entrypoint.
 - Return structured outputs and errors.
 
-This is the next major integration point because it converts the project from several working subsystems into one coherent runtime workflow.
+Remaining work:
+
+- Add deeper runtime telemetry around each phase.
+- Add repeated-run stability tests.
+- Add richer structured error reports.
+- Use this path as the implementation basis for future agent workload execution.
+
+This milestone converts the project from several working subsystems into one coherent runtime workflow.
 
 ### Milestone 2: Agent Workload Check
 
@@ -184,10 +191,11 @@ Longer-term:
 
 The recommended order is:
 
-1. Implement `zug run workload/`.
-2. Add `POST /workloads/check` to the agent.
-3. Add agent request/response JSON tests.
-4. Add WASM spec-test ingestion for the currently supported instruction set.
-5. Add Conv and execution-plan performance work.
-6. Add MobileNetV2 and YOLO conformance tests beyond zero-input smoke tests.
-7. Add `POST /workloads/run` once local workload execution is stable.
+1. Add runtime telemetry around `zug run workload/`.
+2. Add repeated-run stability tests for local workload execution.
+3. Add `POST /workloads/check` to the agent.
+4. Add agent request/response JSON tests.
+5. Add WASM spec-test ingestion for the currently supported instruction set.
+6. Add Conv and execution-plan performance work.
+7. Add MobileNetV2 and YOLO conformance tests beyond zero-input smoke tests.
+8. Add `POST /workloads/run` once local workload execution is stable.

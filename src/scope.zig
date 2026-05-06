@@ -1,4 +1,5 @@
 const std = @import("std");
+const accelerator = @import("accelerator.zig");
 const capabilities = @import("capabilities.zig");
 const wasm_imports = @import("wasm/imports.zig");
 const wasm_manifest = @import("wasm/manifest.zig");
@@ -74,6 +75,7 @@ pub const zug_gpu_scope = [_][]const u8{
 pub const model_execution_scope = [_][]const u8{
     "ONNX graph decoding through generated protobuf bindings",
     "CPU execution target",
+    "accelerator backend catalog for CUDA, TensorRT, ROCm, Vulkan, Metal, DirectML, OpenVINO, CoreML, NNAPI, WebGPU and Edge TPU",
     "f32 inference path for WASI-NN guest inputs",
     "direct host ONNX execution through Session and Executor",
     "raw tensor file input and raw output/expectation checks",
@@ -117,6 +119,7 @@ pub fn print() void {
     printList("onnx operators", &capabilities.supported_operator_names);
     printList("onnx tensor dtypes", &capabilities.supported_tensor_dtype_names);
     printList("model execution", &model_execution_scope);
+    printAcceleratorBackends();
     printList("wasm core", &wasm_core_scope);
     printList("wasi preview1 imports", &wasi_preview1_scope);
     printList("wasi-nn imports", &wasi_nn_scope);
@@ -124,6 +127,17 @@ pub fn print() void {
     printList("zug gpu extension imports", &zug_gpu_scope);
     printList("telemetry", &telemetry_scope);
     printList("next capability frontiers", &next_capability_frontiers);
+}
+
+fn printAcceleratorBackends() void {
+    const caps = accelerator.defaultCapabilities();
+    std.debug.print("accelerator backends: {d}\n", .{caps.backends.len});
+    for (caps.backends) |backend| {
+        std.debug.print("  {s}: {s}\n", .{
+            accelerator.backendKindName(backend.kind),
+            accelerator.backendStatusName(backend.status),
+        });
+    }
 }
 
 fn printList(title: []const u8, items: []const []const u8) void {
@@ -156,4 +170,6 @@ test "scope includes active model compatibility surface" {
     try std.testing.expect(capabilities.isSupportedOperator("ai.onnx", "Softmax"));
     try std.testing.expectEqual(@as(usize, 45), capabilities.supported_operator_names.len);
     try std.testing.expectEqual(@as(usize, 5), capabilities.supported_tensor_dtype_names.len);
+    try std.testing.expect(accelerator.defaultCapabilities().supportsGraphExecution(.cpu));
+    try std.testing.expect(!accelerator.defaultCapabilities().supportsGraphExecution(.cuda));
 }
