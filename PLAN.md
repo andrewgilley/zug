@@ -30,8 +30,8 @@ Implemented project surfaces:
 - WASI Preview 1 host support for args, environment, clock, random, fd stat, fd read/write, descriptor close/seek, preopen discovery, readonly directory iteration, readonly path stat/open, and process exit.
 - A WASI-NN shaped host and ABI surface for graph loading, execution context creation, input binding, compute, output descriptors, and output reads.
 - Guest WASM fixtures that exercise basic execution, WASI logging, and WASI-NN driven inference.
-- Workload manifests through `zug.toml`, target profiles, network requirements, `zug check workload/`, and `zug run workload/`.
-- A host-side `zug agent` that listens over TCP/HTTP and serves `/health` and `/capabilities`.
+- Workload manifests through `zug.toml`, target profiles, network requirements, `zug check workload`, and `zug run workload`.
+- A host-side `zug agent` that listens over TCP/HTTP and serves `health` and `capabilities`.
 
 The strongest proof point is that a WASM guest can drive ONNX inference through the stable host ABI path, and the project can now check and run a workload bundle against a target profile through one local workflow.
 
@@ -133,7 +133,7 @@ Implemented checks:
 
 - `zug check <model.onnx>`
 - `zug check <module.wasm>`
-- `zug check workload/ --kind workload`
+- `zug check workload --kind workload`
 - `zug check ... --json`
 
 Implemented agent:
@@ -144,8 +144,8 @@ zug agent --node edge-a --profile vision-f32-basic --listen 127.0.0.1:7070
 
 Current endpoints:
 
-- `GET /health`
-- `GET /capabilities`
+- `GET health`
+- `GET capabilities`
 
 The agent is the first real networking surface. It is not yet a scheduler, deployer, secure control plane, or remote workload executor.
 
@@ -153,7 +153,7 @@ The agent is the first real networking surface. It is not yet a scheduler, deplo
 
 The highest-value next development slices are:
 
-1. Add runtime telemetry spans and metrics around the local `zug run workload/` path.
+1. Add runtime telemetry spans and metrics around the local `zug run workload` path.
 2. Add `POST /workloads/check` to the agent so a remote caller can ask whether a workload is accepted by a node profile.
 3. Add `POST /workloads/run` only after the local workload run path is stable under repeated tests.
 4. Expand WASI Preview 1 from readonly preopens into file write policy and guest HTTP capability mapping.
@@ -167,8 +167,8 @@ The highest-value next development slices are:
 The first credible product is a compatibility and execution tool for ML-backed WASM workloads:
 
 ```text
-zug check workload/
-zug run workload/
+zug check workload
+zug run workload
 zug agent --node edge-a --profile vision-f32-basic
 ```
 

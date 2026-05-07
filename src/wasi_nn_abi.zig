@@ -271,6 +271,7 @@ pub const Surface = struct {
         const required = tensorByteLen(output.value.dtype, output.value.shape) catch |err| {
             return statusFromError(err);
         };
+
         self.memory.writeU32(out_bytes_written_ptr, required) catch return .invalid_memory;
 
         if (out_data_len < required) return .buffer_too_small;
