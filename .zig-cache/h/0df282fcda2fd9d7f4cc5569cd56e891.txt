@@ -828,7 +828,7 @@
 117057 7599824371480616 1777993919866091700 ef653274261fa67a492ced68e1b16f97 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\interpreter.zig
 45843 229965055972613830 1777993926246215000 d790da00d8e1fb633cae03ed0332035d 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasm\validator.zig
 9184 5910974511540840 1778096824336666000 6956b865108d7565ec7c3fc7a0b24b2a 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\gpu.zig
-21451 81064793292671769 1778096770770887500 8ecb6c03508b138bec82687a838db0d1 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasi_nn_abi.zig
+21452 12666373952281329 1778099133219650100 8f78fec8cfdbbc2a75ade2354b0e34b7 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\wasi_nn_abi.zig
 6067 123848989753211430 1778096919215022100 1df3bbfbc0164f687c3a626de5906f0e 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\accelerator.zig
 12347 80501843339290006 1777990025163461200 4f851a43bbd22e7888e25f14ff9d16a9 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\capabilities.zig
 8276 212795082393272387 1777947929494576300 dcde59601df074f6910121f0495ba77b 0 C:\Users\andre\Desktop\Dev\code\zig\zug\src\tensor.zig

@@ -339,5 +339,9 @@ test "workload manifest validates target requirements" {
     defer manifest.deinit(allocator);
 
     try manifest.validateForTarget(try target.resolve(manifest.targetName()));
-    try std.testing.expectError(error.WorkloadRequiresWasiNn, manifest.validateForTarget(try target.resolve("wasm-basic")));
+
+    try std.testing.expectError(
+        error.WorkloadRequiresWasiNn,
+        manifest.validateForTarget(try target.resolve("wasm-basic"))
+    );
 }

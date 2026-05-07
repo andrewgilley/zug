@@ -131,8 +131,8 @@ The manifest records the entrypoint, guest module, model asset, model encoding, 
 
 Implemented checks:
 
-- `zug check <model.onnx>`
-- `zug check <module.wasm>`
+- `zug check model.onnx`
+- `zug check module.wasm`
 - `zug check workload --kind workload`
 - `zug check ... --json`
 

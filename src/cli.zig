@@ -11,6 +11,9 @@ const accelerator = @import("accelerator.zig");
 const gpu = @import("gpu.zig");
 const scope = @import("scope.zig");
 const wasi_nn_abi = @import("wasi_nn_abi.zig");
+const network = @import("network.zig");
+const target_profile = @import("target.zig");
+const workload = @import("workload.zig");
 const workload_runner = @import("workload_runner.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
 const wasm_compatibility = @import("wasm/compatibility.zig");
@@ -23,6 +26,8 @@ const max_wasm_bytes = 100 * 1024 * 1024;
 const max_tensor_file_bytes = 100 * 1024 * 1024;
 const wasm_page_size: usize = 64 * 1024;
 const default_wasm_memory_bytes: usize = 16 * 1024 * 1024;
+const max_upload_response_bytes: usize = 1024 * 1024;
+const net = std.Io.net;
 
 const CliMode = enum {
     run,
@@ -33,6 +38,7 @@ const CliMode = enum {
     bench,
     wasm,
     agent,
+    upload,
 };
 
 const BenchFormat = enum {
@@ -68,6 +74,9 @@ const CliArgs = struct {
     agent_profile_name: ?[]const u8 = null,
     agent_listen: ?[]const u8 = null,
     agent_once: bool = false,
+    upload_agent_url: ?[]const u8 = null,
+    upload_deploy: bool = false,
+    upload_chunk_size: usize = 64 * 1024,
     run_profile_name: ?[]const u8 = null,
     wasm_stdin: ?[]const u8 = null,
     mock_gpu: bool = false,
@@ -91,6 +100,9 @@ const CliArgs = struct {
         }
         if (self.agent_listen) |listen| {
             allocator.free(listen);
+        }
+        if (self.upload_agent_url) |url| {
+            allocator.free(url);
         }
         if (self.run_profile_name) |profile_name| {
             allocator.free(profile_name);
@@ -158,6 +170,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .gpu = if (cli.mock_gpu) gpu.mockEdgeCapabilities() else .{},
             .accelerators = if (cli.mock_gpu) accelerator.mockEdgeCapabilities() else accelerator.defaultCapabilities(),
         });
+        return;
+    }
+
+    if (cli.mode == .upload) {
+        try runUpload(allocator, &cli);
         return;
     }
 
@@ -479,6 +496,56 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
         return cli;
     }
 
+    if (std.mem.eql(u8, first_arg, "upload")) {
+        const workload_arg = args.next() orelse {
+            printUsage();
+            return error.MissingWorkloadPath;
+        };
+
+        var cli = CliArgs{
+            .mode = .upload,
+            .model_path = try allocator.dupe(u8, workload_arg),
+        };
+        errdefer cli.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--agent")) {
+                const url = args.next() orelse {
+                    printUsage();
+                    return error.MissingUploadAgent;
+                };
+
+                if (cli.upload_agent_url) |old_url| {
+                    allocator.free(old_url);
+                }
+                cli.upload_agent_url = try allocator.dupe(u8, url);
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--deploy")) {
+                cli.upload_deploy = true;
+                continue;
+            }
+
+            if (std.mem.eql(u8, arg, "--chunk-size")) {
+                const value = args.next() orelse {
+                    printUsage();
+                    return error.MissingUploadChunkSize;
+                };
+
+                cli.upload_chunk_size = try std.fmt.parseInt(usize, value, 10);
+                if (cli.upload_chunk_size == 0) return error.InvalidUploadChunkSize;
+                continue;
+            }
+
+            printUsage();
+            return error.UnknownArgument;
+        }
+
+        if (cli.upload_agent_url == null) return error.MissingUploadAgent;
+        return cli;
+    }
+
     if (std.mem.eql(u8, first_arg, "bench")) {
         const model_arg = args.next() orelse {
             printUsage();
@@ -728,6 +795,7 @@ fn printUsage() void {
         \\usage:
         \\  zug scope
         \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once] [--mock-gpu]
+        \\  zug upload <workload/> --agent http://host:port [--deploy] [--chunk-size bytes]
         \\  zug run <workload/> [--profile profile] [--arg i32] [--stdin text] [--json] [--mock-gpu]
         \\  zug check <file.onnx|file.wasm|workload/> [--kind auto|onnx|wasm|workload] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
@@ -757,11 +825,19 @@ fn printUsage() void {
         \\  --model-offset also writes that model into guest memory for legacy guests
         \\  --mock-gpu enables a host mock GPU device and mock accelerator backend catalog
         \\
+        \\upload:
+        \\  uploads zug.toml, the WASM module, and optional model into the agent artifact store
+        \\  --deploy checks and registers the uploaded workload on the target agent
+        \\
         \\agent:
         \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads, GET /telemetry over HTTP
         \\  POST /workloads/check with {{"path":"workload/"}} returns compatibility JSON
         \\  POST /workloads/deploy with {{"path":"workload/"}} registers a supported workload
-        \\  POST /workloads/<id>/invoke runs a registered workload entrypoint with optional {{"args":[i32],"stdin":"..."}}
+        \\  POST /workloads/<id>/invoke queues an async invoke job with optional {{"args":[i32],"stdin":"..."}}
+        \\  GET /jobs and GET /jobs/<id> report async workload invocation job status
+        \\  POST /jobs/<id>/cancel requests cancellation for a queued or running invoke job
+        \\  POST /packages/files with {{"path":"workloads/demo/model.onnx","offset":0,"data_hex":"...","truncate":true}} uploads package/model chunks
+        \\  GET /packages lists uploaded package files and stored paths
         \\  POST /telemetry/events with {{"source":"camera","kind":"frame_drop","severity":"warn","message":"..."}} records an event
         \\  POST /telemetry/metrics with {{"source":"runtime","name":"latency_ms","value":14.5,"unit":"ms"}} records a scalar metric
         \\  POST /telemetry/traces records a local trace span
@@ -1161,6 +1237,472 @@ fn runWorkload(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
         .text => printWorkloadRunText(result),
         .json => try printWorkloadRunJson(allocator, result),
     }
+}
+
+const UploadEndpoint = struct {
+    host: []const u8,
+    port: u16,
+
+    fn deinit(self: *UploadEndpoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.host);
+        self.* = undefined;
+    }
+};
+
+const UploadPackage = struct {
+    name: []const u8,
+    remote_dir: []const u8,
+    deploy_path: []const u8,
+    manifest_bytes: []const u8,
+    wasm_remote_name: []const u8,
+    model_remote_name: ?[]const u8,
+
+    fn deinit(self: *UploadPackage, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.remote_dir);
+        allocator.free(self.deploy_path);
+        allocator.free(self.manifest_bytes);
+        allocator.free(self.wasm_remote_name);
+        if (self.model_remote_name) |name| allocator.free(name);
+        self.* = undefined;
+    }
+};
+
+fn runUpload(allocator: std.mem.Allocator, cli: *const CliArgs) !void {
+    var loaded = try workload.Loaded.load(allocator, cli.model_path);
+    defer loaded.deinit(allocator);
+
+    var endpoint = try parseUploadEndpoint(allocator, cli.upload_agent_url.?);
+    defer endpoint.deinit(allocator);
+
+    var package = try buildUploadPackage(allocator, loaded);
+    defer package.deinit(allocator);
+
+    std.debug.print("zug upload workload\n", .{});
+    std.debug.print("  name: {s}\n", .{package.name});
+    std.debug.print("  agent: http://{s}:{d}\n", .{ endpoint.host, endpoint.port });
+    std.debug.print("  package: {s}\n", .{package.remote_dir});
+
+    const manifest_remote_path = try joinRemotePath(allocator, package.remote_dir, workload.manifest_file_name);
+    defer allocator.free(manifest_remote_path);
+    try uploadBytes(allocator, endpoint, manifest_remote_path, package.manifest_bytes, cli.upload_chunk_size);
+    std.debug.print("  uploaded: {s} ({d} bytes)\n", .{ manifest_remote_path, package.manifest_bytes.len });
+
+    const wasm_bytes = try readUploadFile(allocator, loaded.wasm_path, max_wasm_bytes);
+    defer allocator.free(wasm_bytes);
+    const wasm_remote_path = try joinRemotePath(allocator, package.remote_dir, package.wasm_remote_name);
+    defer allocator.free(wasm_remote_path);
+    try uploadBytes(allocator, endpoint, wasm_remote_path, wasm_bytes, cli.upload_chunk_size);
+    std.debug.print("  uploaded: {s} ({d} bytes)\n", .{ wasm_remote_path, wasm_bytes.len });
+
+    if (loaded.model_path) |model_path| {
+        const model_remote_name = package.model_remote_name orelse return error.MissingUploadModelName;
+        const model_bytes = try readUploadFile(allocator, model_path, max_model_bytes);
+        defer allocator.free(model_bytes);
+        const model_remote_path = try joinRemotePath(allocator, package.remote_dir, model_remote_name);
+        defer allocator.free(model_remote_path);
+        try uploadBytes(allocator, endpoint, model_remote_path, model_bytes, cli.upload_chunk_size);
+        std.debug.print("  uploaded: {s} ({d} bytes)\n", .{ model_remote_path, model_bytes.len });
+    }
+
+    if (cli.upload_deploy) {
+        const check_response = try postPathRequest(allocator, endpoint, "/workloads/check", package.deploy_path);
+        defer allocator.free(check_response);
+        const deploy_response = try postPathRequest(allocator, endpoint, "/workloads/deploy", package.deploy_path);
+        defer allocator.free(deploy_response);
+        std.debug.print("  deploy: {s}\n", .{trimResponseForDisplay(deploy_response)});
+    } else {
+        std.debug.print("  deploy: skipped (use --deploy to register {s})\n", .{package.deploy_path});
+    }
+}
+
+fn parseUploadEndpoint(allocator: std.mem.Allocator, raw_url: []const u8) !UploadEndpoint {
+    var rest = std.mem.trim(u8, raw_url, " \t\r\n");
+    if (rest.len == 0) return error.InvalidUploadAgent;
+
+    if (std.mem.startsWith(u8, rest, "https://")) return error.UploadHttpsUnsupported;
+    if (std.mem.startsWith(u8, rest, "http://")) rest = rest["http://".len..];
+
+    const slash_index = std.mem.indexOfScalar(u8, rest, '/');
+    const host_port = if (slash_index) |index| rest[0..index] else rest;
+    if (host_port.len == 0) return error.InvalidUploadAgent;
+
+    if (slash_index) |index| {
+        const path = rest[index..];
+        if (!std.mem.eql(u8, path, "/")) return error.UploadAgentPathUnsupported;
+    }
+
+    if (host_port[0] == '[') return error.UploadIpv6Unsupported;
+    const colon_index = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.MissingUploadAgentPort;
+    if (colon_index == 0 or colon_index + 1 >= host_port.len) return error.InvalidUploadAgent;
+
+    const host = host_port[0..colon_index];
+    const port = try std.fmt.parseInt(u16, host_port[colon_index + 1 ..], 10);
+
+    return .{
+        .host = try allocator.dupe(u8, host),
+        .port = port,
+    };
+}
+
+fn buildUploadPackage(allocator: std.mem.Allocator, loaded: workload.Loaded) !UploadPackage {
+    const base_name = loaded.manifest.name orelse std.fs.path.basename(loaded.root_path);
+    const safe_name = try sanitizeUploadName(allocator, base_name);
+    errdefer allocator.free(safe_name);
+
+    const remote_dir = try std.fmt.allocPrint(allocator, "workloads/{s}", .{safe_name});
+    errdefer allocator.free(remote_dir);
+
+    const deploy_path = try std.fmt.allocPrint(allocator, ".zug-artifacts/{s}", .{remote_dir});
+    errdefer allocator.free(deploy_path);
+
+    const wasm_remote_name = try sanitizeUploadName(allocator, std.fs.path.basename(loaded.wasm_path));
+    errdefer allocator.free(wasm_remote_name);
+
+    const model_remote_name = if (loaded.model_path) |path| try sanitizeUploadName(allocator, std.fs.path.basename(path)) else null;
+    errdefer if (model_remote_name) |name| allocator.free(name);
+
+    const manifest_bytes = try renderUploadManifest(allocator, loaded.manifest, safe_name, wasm_remote_name, model_remote_name);
+    errdefer allocator.free(manifest_bytes);
+
+    return .{
+        .name = safe_name,
+        .remote_dir = remote_dir,
+        .deploy_path = deploy_path,
+        .manifest_bytes = manifest_bytes,
+        .wasm_remote_name = wasm_remote_name,
+        .model_remote_name = model_remote_name,
+    };
+}
+
+fn sanitizeUploadName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, name, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, ".") or std.mem.eql(u8, trimmed, "..")) {
+        return error.InvalidUploadName;
+    }
+
+    const out = try allocator.alloc(u8, trimmed.len);
+    errdefer allocator.free(out);
+    var wrote_valid = false;
+    for (trimmed, 0..) |char, index| {
+        out[index] = switch (char) {
+            'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => char,
+            else => '-',
+        };
+        if (out[index] != '.' and out[index] != '-') wrote_valid = true;
+    }
+
+    if (!wrote_valid) return error.InvalidUploadName;
+    if (std.mem.indexOf(u8, out, "..") != null) return error.InvalidUploadName;
+    return out;
+}
+
+fn renderUploadManifest(
+    allocator: std.mem.Allocator,
+    manifest: workload.Manifest,
+    name: []const u8,
+    wasm_remote_name: []const u8,
+    model_remote_name: ?[]const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+
+    try out.writer.writeAll("name = ");
+    try writeTomlString(&out.writer, name);
+    try out.writer.writeByte('\n');
+
+    try out.writer.writeAll("entrypoint = ");
+    try writeTomlString(&out.writer, manifest.entrypointName());
+    try out.writer.writeByte('\n');
+
+    try out.writer.writeAll("wasm = ");
+    try writeTomlString(&out.writer, wasm_remote_name);
+    try out.writer.writeByte('\n');
+
+    if (model_remote_name) |model_name| {
+        try out.writer.writeAll("model = ");
+        try writeTomlString(&out.writer, model_name);
+        try out.writer.writeByte('\n');
+    }
+
+    if (manifest.model_encoding) |encoding| {
+        try out.writer.writeAll("model_encoding = ");
+        try writeTomlString(&out.writer, encoding);
+        try out.writer.writeByte('\n');
+    }
+
+    try out.writer.writeAll("\n[requires]\n");
+    try out.writer.print("wasi_nn = {}\n", .{manifest.requires.wasi_nn});
+    try out.writer.print("wasi_http = {}\n", .{manifest.requires.wasi_http});
+    if (manifest.requires.memory_bytes) |memory_bytes| try out.writer.print("memory_bytes = {d}\n", .{memory_bytes});
+    if (manifest.requires.dtype) |dtype| {
+        try out.writer.writeAll("dtype = ");
+        try writeTomlString(&out.writer, dtypeName(dtype));
+        try out.writer.writeByte('\n');
+    }
+    if (manifest.requires.target_name) |target_name| {
+        try out.writer.writeAll("target = ");
+        try writeTomlString(&out.writer, target_name);
+        try out.writer.writeByte('\n');
+    }
+
+    if (manifest.network.input != null or
+        manifest.network.output != null or
+        manifest.network.ingress.items.len != 0 or
+        manifest.network.egress.items.len != 0 or
+        manifest.network.max_inflight != null or
+        manifest.network.request_timeout_ms != null or
+        manifest.network.public_egress)
+    {
+        try out.writer.writeAll("\n[network]\n");
+        if (manifest.network.input) |protocol| try writeProtocolField(&out.writer, "input", protocol);
+        if (manifest.network.output) |protocol| try writeProtocolField(&out.writer, "output", protocol);
+        for (manifest.network.ingress.items) |protocol| try writeProtocolField(&out.writer, "ingress", protocol);
+        for (manifest.network.egress.items) |protocol| try writeProtocolField(&out.writer, "egress", protocol);
+        if (manifest.network.max_inflight) |max_inflight| try out.writer.print("max_inflight = {d}\n", .{max_inflight});
+        if (manifest.network.request_timeout_ms) |timeout| try out.writer.print("request_timeout_ms = {d}\n", .{timeout});
+        if (manifest.network.public_egress) try out.writer.writeAll("public_egress = true\n");
+    }
+
+    return try out.toOwnedSlice();
+}
+
+fn writeTomlString(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |char| {
+        switch (char) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (char < 32) return error.InvalidTomlString;
+                try writer.writeByte(char);
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeProtocolField(writer: *std.Io.Writer, key: []const u8, protocol: network.Protocol) !void {
+    try writer.print("{s} = ", .{key});
+    try writeTomlString(writer, network.protocolName(protocol));
+    try writer.writeByte('\n');
+}
+
+fn dtypeName(dtype: target_profile.DType) []const u8 {
+    return switch (dtype) {
+        .float32 => "float32",
+        .int64 => "int64",
+        .int32 => "int32",
+        .uint8 => "uint8",
+        .bool => "bool",
+    };
+}
+
+fn joinRemotePath(allocator: std.mem.Allocator, dir: []const u8, name: []const u8) ![]const u8 {
+    if (dir.len == 0 or name.len == 0) return error.InvalidUploadPath;
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+}
+
+fn readUploadFile(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    return try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        path,
+        allocator,
+        .limited(limit),
+    );
+}
+
+fn uploadBytes(
+    allocator: std.mem.Allocator,
+    endpoint: UploadEndpoint,
+    remote_path: []const u8,
+    bytes: []const u8,
+    chunk_size: usize,
+) !void {
+    if (chunk_size == 0) return error.InvalidUploadChunkSize;
+
+    if (bytes.len == 0) {
+        try uploadChunk(allocator, endpoint, remote_path, 0, &.{}, true);
+        return;
+    }
+
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(bytes.len, offset + chunk_size);
+        try uploadChunk(allocator, endpoint, remote_path, offset, bytes[offset..end], offset == 0);
+        offset = end;
+    }
+}
+
+fn uploadChunk(
+    allocator: std.mem.Allocator,
+    endpoint: UploadEndpoint,
+    remote_path: []const u8,
+    offset: usize,
+    chunk: []const u8,
+    truncate: bool,
+) !void {
+    const body = try buildUploadChunkBody(allocator, remote_path, offset, chunk, truncate);
+    defer allocator.free(body);
+
+    const response = try httpPostJson(allocator, endpoint, "/packages/files", body);
+    defer allocator.free(response);
+}
+
+fn buildUploadChunkBody(
+    allocator: std.mem.Allocator,
+    remote_path: []const u8,
+    offset: usize,
+    chunk: []const u8,
+    truncate: bool,
+) ![]u8 {
+    const hex = try hexEncodeAlloc(allocator, chunk);
+    defer allocator.free(hex);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("path");
+    try json.write(remote_path);
+    try json.objectField("offset");
+    try json.write(offset);
+    try json.objectField("data_hex");
+    try json.write(hex);
+    try json.objectField("truncate");
+    try json.write(truncate);
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn postPathRequest(
+    allocator: std.mem.Allocator,
+    endpoint: UploadEndpoint,
+    target: []const u8,
+    path: []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("path");
+    try json.write(path);
+    try json.endObject();
+
+    const body = try out.toOwnedSlice();
+    defer allocator.free(body);
+
+    return try httpPostJson(allocator, endpoint, target, body);
+}
+
+fn hexEncodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        const high = byte >> 4;
+        const low = byte & 0x0f;
+        out[index * 2] = hexDigit(high);
+        out[index * 2 + 1] = hexDigit(low);
+    }
+    return out;
+}
+
+fn hexDigit(value: u8) u8 {
+    return if (value < 10) '0' + value else 'a' + (value - 10);
+}
+
+fn httpPostJson(
+    allocator: std.mem.Allocator,
+    endpoint: UploadEndpoint,
+    target: []const u8,
+    body: []const u8,
+) ![]u8 {
+    const response = try httpRequest(allocator, endpoint, "POST", target, "application/json", body);
+    errdefer allocator.free(response);
+    ensureHttpOk(response) catch |err| {
+        std.debug.print("  agent response: {s}\n", .{trimResponseForDisplay(response)});
+        return err;
+    };
+    return try responseBodyOwned(allocator, response);
+}
+
+fn httpRequest(
+    allocator: std.mem.Allocator,
+    endpoint: UploadEndpoint,
+    method: []const u8,
+    target: []const u8,
+    content_type: []const u8,
+    body: []const u8,
+) ![]u8 {
+    const io = std.Options.debug_io;
+    var address = try resolveUploadAddress(io, endpoint);
+    var stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var write_buffer: [4096]u8 = undefined;
+    var writer_state = stream.writer(io, &write_buffer);
+    try writer_state.interface.print(
+        "{s} {s} HTTP/1.1\r\nHost: {s}:{d}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ method, target, endpoint.host, endpoint.port, content_type, body.len },
+    );
+    try writer_state.interface.writeAll(body);
+    try writer_state.interface.flush();
+
+    var read_buffer: [4096]u8 = undefined;
+    var reader_state = stream.reader(io, &read_buffer);
+    var response: std.Io.Writer.Allocating = .init(allocator);
+    errdefer response.deinit();
+
+    var total: usize = 0;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const read_count = try reader_state.interface.readSliceShort(&chunk);
+        if (read_count == 0) break;
+        total = try std.math.add(usize, total, read_count);
+        if (total > max_upload_response_bytes) return error.UploadHttpResponseTooLarge;
+        try response.writer.writeAll(chunk[0..read_count]);
+    }
+
+    return try response.toOwnedSlice();
+}
+
+fn resolveUploadAddress(io: std.Io, endpoint: UploadEndpoint) !net.IpAddress {
+    if (std.mem.eql(u8, endpoint.host, "localhost")) return .{ .ip4 = .loopback(endpoint.port) };
+    if (std.mem.eql(u8, endpoint.host, "127.0.0.1")) return .{ .ip4 = .loopback(endpoint.port) };
+    return try net.IpAddress.resolve(io, endpoint.host, endpoint.port);
+}
+
+fn ensureHttpOk(response: []const u8) !void {
+    if (std.mem.startsWith(u8, response, "HTTP/1.1 200 ") or
+        std.mem.startsWith(u8, response, "HTTP/1.0 200 "))
+    {
+        return;
+    }
+    return error.UploadHttpFailed;
+}
+
+fn responseBodyOwned(allocator: std.mem.Allocator, response: []u8) ![]u8 {
+    const body_start = if (std.mem.indexOf(u8, response, "\r\n\r\n")) |index|
+        index + 4
+    else if (std.mem.indexOf(u8, response, "\n\n")) |index|
+        index + 2
+    else
+        return error.InvalidHttpResponse;
+
+    const body = try allocator.dupe(u8, response[body_start..]);
+    allocator.free(response);
+    return body;
+}
+
+fn trimResponseForDisplay(response_body: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, response_body, " \t\r\n");
+    if (trimmed.len <= 240) return trimmed;
+    return trimmed[0..240];
 }
 
 fn printWorkloadRunText(result: workload_runner.Result) void {

@@ -154,6 +154,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const control_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/control.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const package_transfer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/package_transfer.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const gpu_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/gpu.zig"),
@@ -228,6 +244,8 @@ pub fn build(b: *std.Build) void {
     const run_target_tests = b.addRunArtifact(target_tests);
     const run_network_tests = b.addRunArtifact(network_tests);
     const run_telemetry_tests = b.addRunArtifact(telemetry_tests);
+    const run_control_tests = b.addRunArtifact(control_tests);
+    const run_package_transfer_tests = b.addRunArtifact(package_transfer_tests);
     const run_gpu_tests = b.addRunArtifact(gpu_tests);
     const run_agent_tests = b.addRunArtifact(agent_tests);
     const run_workload_tests = b.addRunArtifact(workload_tests);
@@ -246,6 +264,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_target_tests.step);
     test_step.dependOn(&run_network_tests.step);
     test_step.dependOn(&run_telemetry_tests.step);
+    test_step.dependOn(&run_control_tests.step);
+    test_step.dependOn(&run_package_transfer_tests.step);
     test_step.dependOn(&run_gpu_tests.step);
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_workload_tests.step);

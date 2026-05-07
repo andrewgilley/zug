@@ -4,6 +4,7 @@ const capabilities = @import("capabilities.zig");
 const gpu = @import("gpu.zig");
 const network = @import("network.zig");
 const onnx = @import("proto/onnx.pb.zig");
+const package_transfer = @import("package_transfer.zig");
 const scope = @import("scope.zig");
 const target_profile = @import("target.zig");
 const telemetry = @import("telemetry.zig");
@@ -20,6 +21,7 @@ pub const Config = struct {
     node_id: []const u8 = "local-node",
     profile_name: []const u8 = "vision-f32-basic",
     listen: []const u8 = "127.0.0.1:7070",
+    artifact_root: []const u8 = ".zug-artifacts",
     once: bool = false,
     policy: RuntimePolicy = .{},
     gpu: gpu.Capabilities = .{},
@@ -33,12 +35,14 @@ pub const RuntimePolicy = struct {
     max_stdout_bytes: usize = 64 * 1024,
     max_stderr_bytes: usize = 64 * 1024,
     max_invoke_duration_ns: u64 = 5 * 1_000_000_000,
+    max_upload_chunk_bytes: usize = 64 * 1024,
 };
 
 const ActivityKind = enum {
     workload_check,
     workload_deploy,
     workload_invoke,
+    package_upload,
 };
 
 const ActivityStatus = enum {
@@ -65,6 +69,14 @@ const WorkloadStatus = enum {
     accepted,
     loaded,
     failed,
+};
+
+const InvokeJobStatus = enum {
+    queued,
+    running,
+    completed,
+    failed,
+    cancel_requested,
 };
 
 const RegisteredWorkload = struct {
@@ -102,6 +114,86 @@ const RegisteredWorkload = struct {
     }
 };
 
+const InvokeJob = struct {
+    id: u64,
+    workload_id: u64,
+    activity_id: u64 = 0,
+    status: InvokeJobStatus = .queued,
+    submitted_ns: u64,
+    started_ns: u64 = 0,
+    finished_ns: u64 = 0,
+    duration_ns: u64 = 0,
+    memory_bytes: usize = 0,
+    exit_code: ?u32 = null,
+    result: ?wasm_interpreter.Value = null,
+    stdout: []const u8,
+    stderr: []const u8,
+    error_name: []const u8,
+
+    fn deinit(self: *InvokeJob, allocator: std.mem.Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+        allocator.free(self.error_name);
+        self.* = undefined;
+    }
+
+    fn setRunning(self: *InvokeJob, started_ns: u64) void {
+        if (self.status == .cancel_requested) return;
+        self.status = .running;
+        self.started_ns = started_ns;
+    }
+
+    fn setCompleted(
+        self: *InvokeJob,
+        allocator: std.mem.Allocator,
+        result: InvokeResult,
+        activity_id: u64,
+        finished_ns: u64,
+    ) !void {
+        const stdout = try allocator.dupe(u8, result.stdout);
+        errdefer allocator.free(stdout);
+
+        const stderr = try allocator.dupe(u8, result.stderr);
+        errdefer allocator.free(stderr);
+
+        const error_name = try allocator.dupe(u8, "");
+        errdefer allocator.free(error_name);
+
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+        allocator.free(self.error_name);
+
+        self.status = .completed;
+        self.activity_id = activity_id;
+        self.finished_ns = finished_ns;
+        self.duration_ns = result.duration_ns;
+        self.memory_bytes = result.memory_bytes;
+        self.exit_code = result.exit_code;
+        self.result = result.result;
+        self.stdout = stdout;
+        self.stderr = stderr;
+        self.error_name = error_name;
+    }
+
+    fn setFailed(
+        self: *InvokeJob,
+        allocator: std.mem.Allocator,
+        err: anyerror,
+        activity_id: u64,
+        finished_ns: u64,
+    ) !void {
+        const error_name = try allocator.dupe(u8, @errorName(err));
+        errdefer allocator.free(error_name);
+
+        allocator.free(self.error_name);
+
+        self.status = .failed;
+        self.activity_id = activity_id;
+        self.finished_ns = finished_ns;
+        self.error_name = error_name;
+    }
+};
+
 const WorkloadCandidate = struct {
     path: []const u8,
     name: []const u8,
@@ -122,15 +214,81 @@ const WorkloadCandidate = struct {
     }
 };
 
+fn cloneRegisteredWorkload(
+    allocator: std.mem.Allocator,
+    registered: RegisteredWorkload,
+) !RegisteredWorkload {
+    const path = try allocator.dupe(u8, registered.path);
+    errdefer allocator.free(path);
+
+    const name = try allocator.dupe(u8, registered.name);
+    errdefer allocator.free(name);
+
+    const profile = try allocator.dupe(u8, registered.profile);
+    errdefer allocator.free(profile);
+
+    const entrypoint = try allocator.dupe(u8, registered.entrypoint);
+    errdefer allocator.free(entrypoint);
+
+    const wasm_path = try allocator.dupe(u8, registered.wasm_path);
+    errdefer allocator.free(wasm_path);
+
+    const model_path = try allocator.dupe(u8, registered.model_path);
+    errdefer allocator.free(model_path);
+
+    const last_error = try allocator.dupe(u8, registered.last_error);
+    errdefer allocator.free(last_error);
+
+    return .{
+        .id = registered.id,
+        .status = registered.status,
+        .path = path,
+        .name = name,
+        .profile = profile,
+        .entrypoint = entrypoint,
+        .wasm_path = wasm_path,
+        .model_path = model_path,
+        .memory_bytes = registered.memory_bytes,
+        .last_error = last_error,
+        .activity_id = registered.activity_id,
+    };
+}
+
+const UploadedFile = struct {
+    path: []const u8,
+    stored_path: []const u8,
+    byte_len: usize,
+    activity_id: u64,
+
+    fn deinit(self: *UploadedFile, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.stored_path);
+        self.* = undefined;
+    }
+};
+
 pub const State = struct {
     next_activity_id: u64 = 1,
     next_workload_id: u64 = 1,
+    next_job_id: u64 = 1,
     activities: std.ArrayList(Activity) = .empty,
     workloads: std.ArrayList(RegisteredWorkload) = .empty,
+    uploaded_files: std.ArrayList(UploadedFile) = .empty,
+    invoke_jobs: std.ArrayList(InvokeJob) = .empty,
     telemetry_store: telemetry.Store = .{},
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.telemetry_store.deinit(allocator);
+
+        for (self.invoke_jobs.items) |*job| {
+            job.deinit(allocator);
+        }
+        self.invoke_jobs.deinit(allocator);
+
+        for (self.uploaded_files.items) |*uploaded| {
+            uploaded.deinit(allocator);
+        }
+        self.uploaded_files.deinit(allocator);
 
         for (self.workloads.items) |*registered| {
             registered.deinit(allocator);
@@ -180,12 +338,53 @@ pub const State = struct {
         return null;
     }
 
+    fn findJobById(self: *State, id: u64) ?*InvokeJob {
+        for (self.invoke_jobs.items) |*job| {
+            if (job.id == id) return job;
+        }
+
+        return null;
+    }
+
     fn findWorkloadById(self: *State, id: u64) ?*RegisteredWorkload {
         for (self.workloads.items) |*registered| {
             if (registered.id == id) return registered;
         }
 
         return null;
+    }
+
+    fn recordUploadedFile(
+        self: *State,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        stored_path: []const u8,
+        byte_len: usize,
+        activity_id: u64,
+    ) !void {
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+
+        const owned_stored_path = try allocator.dupe(u8, stored_path);
+        errdefer allocator.free(owned_stored_path);
+
+        for (self.uploaded_files.items) |*uploaded| {
+            if (std.mem.eql(u8, uploaded.path, path)) {
+                allocator.free(uploaded.stored_path);
+                uploaded.stored_path = owned_stored_path;
+                uploaded.byte_len = byte_len;
+                uploaded.activity_id = activity_id;
+                allocator.free(owned_path);
+                return;
+            }
+        }
+
+        try self.uploaded_files.append(allocator, .{
+            .path = owned_path,
+            .stored_path = owned_stored_path,
+            .byte_len = byte_len,
+            .activity_id = activity_id,
+        });
     }
 
     fn registerWorkload(
@@ -234,6 +433,48 @@ pub const State = struct {
 
         return id;
     }
+
+    fn createInvokeJob(
+        self: *State,
+        allocator: std.mem.Allocator,
+        workload_id: u64,
+        submitted_ns: u64,
+    ) !u64 {
+        const stdout = try allocator.dupe(u8, "");
+        errdefer allocator.free(stdout);
+
+        const stderr = try allocator.dupe(u8, "");
+        errdefer allocator.free(stderr);
+
+        const error_name = try allocator.dupe(u8, "");
+        errdefer allocator.free(error_name);
+
+        const id = self.next_job_id;
+        self.next_job_id += 1;
+
+        try self.invoke_jobs.append(allocator, .{
+            .id = id,
+            .workload_id = workload_id,
+            .submitted_ns = submitted_ns,
+            .stdout = stdout,
+            .stderr = stderr,
+            .error_name = error_name,
+        });
+
+        return id;
+    }
+};
+
+const SharedState = struct {
+    mutex: std.Io.Mutex = .init,
+    state: State = .{},
+
+    fn deinit(self: *SharedState, allocator: std.mem.Allocator) void {
+        const io = std.Options.debug_io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.state.deinit(allocator);
+    }
 };
 
 const Status = struct {
@@ -257,15 +498,146 @@ pub fn serve(allocator: std.mem.Allocator, config: Config) !void {
     var server = try address.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
-    var state = State{};
-    defer state.deinit(allocator);
+    var shared_state = SharedState{};
+    defer shared_state.deinit(allocator);
 
     std.debug.print("zug agent listening on {f}\n", .{server.socket.address});
 
     while (true) {
         const stream = try server.accept(io);
-        try handleConnection(allocator, io, stream, config, &state);
-        if (config.once) break;
+        if (config.once) {
+            try handleConnection(allocator, io, stream, config, &shared_state);
+            break;
+        }
+
+        const context = try allocator.create(ConnectionContext);
+        context.* = .{
+            .allocator = allocator,
+            .io = io,
+            .stream = stream,
+            .config = config,
+            .shared_state = &shared_state,
+        };
+
+        const thread = std.Thread.spawn(.{}, handleConnectionThread, .{context}) catch |err| {
+            allocator.destroy(context);
+            stream.close(io);
+            return err;
+        };
+        thread.detach();
+    }
+}
+
+const ConnectionContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    config: Config,
+    shared_state: *SharedState,
+};
+
+const InvokeJobContext = struct {
+    allocator: std.mem.Allocator,
+    shared_state: *SharedState,
+    job_id: u64,
+    registered: RegisteredWorkload,
+    request: InvokeRequest,
+    policy: RuntimePolicy,
+    gpu_caps: gpu.Capabilities,
+    accelerator_caps: accelerator.Capabilities,
+
+    fn deinit(self: *InvokeJobContext) void {
+        self.registered.deinit(self.allocator);
+        self.request.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
+fn handleConnectionThread(context: *ConnectionContext) void {
+    defer context.allocator.destroy(context);
+    handleConnection(
+        context.allocator,
+        context.io,
+        context.stream,
+        context.config,
+        context.shared_state,
+    ) catch |err| {
+        std.debug.print("zug agent connection failed: {s}\n", .{@errorName(err)});
+    };
+}
+
+fn handleInvokeJobThread(context: *InvokeJobContext) void {
+    defer {
+        context.deinit();
+        context.allocator.destroy(context);
+    }
+
+    const allocator = context.allocator;
+    const started_ns = monotonicNowNs();
+    {
+        const io = std.Options.debug_io;
+        context.shared_state.mutex.lockUncancelable(io);
+        defer context.shared_state.mutex.unlock(io);
+        if (context.shared_state.state.findJobById(context.job_id)) |job| {
+            job.setRunning(started_ns);
+        }
+    }
+
+    var result = executeRegisteredWorkload(
+        allocator,
+        context.registered,
+        context.request,
+        context.policy,
+        context.gpu_caps,
+        context.accelerator_caps,
+    ) catch |err| {
+        const finished_ns = monotonicNowNs();
+        const io = std.Options.debug_io;
+        context.shared_state.mutex.lockUncancelable(io);
+        defer context.shared_state.mutex.unlock(io);
+
+        const activity_id = context.shared_state.state.record(
+            allocator,
+            .workload_invoke,
+            .failed,
+            context.registered.path,
+            @errorName(err),
+        ) catch 0;
+
+        if (context.shared_state.state.findWorkloadById(context.registered.id)) |registered| {
+            registered.status = .failed;
+            registered.activity_id = activity_id;
+            registered.setLastError(allocator, @errorName(err)) catch {};
+        }
+
+        if (context.shared_state.state.findJobById(context.job_id)) |job| {
+            job.setFailed(allocator, err, activity_id, finished_ns) catch {};
+        }
+        return;
+    };
+    defer result.deinit(allocator);
+
+    const finished_ns = monotonicNowNs();
+    const io = std.Options.debug_io;
+    context.shared_state.mutex.lockUncancelable(io);
+    defer context.shared_state.mutex.unlock(io);
+
+    const activity_id = context.shared_state.state.record(
+        allocator,
+        .workload_invoke,
+        .accepted,
+        context.registered.path,
+        "completed",
+    ) catch 0;
+
+    if (context.shared_state.state.findWorkloadById(context.registered.id)) |registered| {
+        registered.status = .loaded;
+        registered.activity_id = activity_id;
+        registered.setLastError(allocator, "") catch {};
+    }
+
+    if (context.shared_state.state.findJobById(context.job_id)) |job| {
+        job.setCompleted(allocator, result, activity_id, finished_ns) catch {};
     }
 }
 
@@ -274,16 +646,18 @@ fn handleConnection(
     io: std.Io,
     stream: net.Stream,
     config: Config,
-    state: *State,
+    shared_state: *SharedState,
 ) !void {
     defer stream.close(io);
 
     var read_buffer: [4096]u8 = undefined;
     var reader_state = stream.reader(io, &read_buffer);
-    var request_buffer: [8192]u8 = undefined;
-    const request = try readHttpRequest(&reader_state.interface, &request_buffer);
+    const request_buffer_len = try std.math.add(usize, config.policy.max_request_body_bytes, 8192);
+    const request_buffer = try allocator.alloc(u8, request_buffer_len);
+    defer allocator.free(request_buffer);
+    const request = try readHttpRequest(&reader_state.interface, request_buffer);
 
-    const response = try responseForRequestWithState(allocator, request, config, state);
+    const response = try responseForRequestWithSharedState(allocator, request, config, shared_state);
     defer allocator.free(response);
 
     var write_buffer: [4096]u8 = undefined;
@@ -329,6 +703,111 @@ pub fn responseForRequest(
     defer state.deinit(allocator);
 
     return responseForRequestWithState(allocator, request, config, &state);
+}
+
+fn responseForRequestWithSharedState(
+    allocator: std.mem.Allocator,
+    request: []const u8,
+    config: Config,
+    shared_state: *SharedState,
+) ![]u8 {
+    const line = parseRequestLine(request) catch {
+        return jsonResponse(allocator, .bad_request, "{\"error\":\"bad_request\"}");
+    };
+
+    const path = requestPath(line.target);
+    if (std.mem.eql(u8, line.method, "GET")) {
+        if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/health")) {
+            const body = try healthJson(allocator, config);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/capabilities")) {
+            const body = try capabilitiesJson(allocator, config);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+    }
+
+    if (std.mem.eql(u8, line.method, "POST") and std.mem.eql(u8, path, "/packages/files")) {
+        var input = parsePackageFileUploadRequest(allocator, requestBody(request), config.policy) catch {
+            return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_package_file_upload\"}");
+        };
+        defer input.deinit(allocator);
+
+        var result = package_transfer.writeChunk(allocator, config.artifact_root, .{
+            .path = input.path,
+            .offset = input.offset,
+            .data_hex = input.data_hex,
+            .truncate = input.truncate,
+        }, config.policy.max_upload_chunk_bytes) catch |err| {
+            const io = std.Options.debug_io;
+            shared_state.mutex.lockUncancelable(io);
+            defer shared_state.mutex.unlock(io);
+            const activity_id = try shared_state.state.record(allocator, .package_upload, .rejected, input.path, @errorName(err));
+            const body = try packageFileUploadFailureJson(allocator, input.path, err, activity_id);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        };
+        defer result.deinit(allocator);
+
+        const activity_id = blk: {
+            const io = std.Options.debug_io;
+            shared_state.mutex.lockUncancelable(io);
+            defer shared_state.mutex.unlock(io);
+            const id = try shared_state.state.record(allocator, .package_upload, .accepted, input.path, "stored");
+            try shared_state.state.recordUploadedFile(allocator, input.path, result.stored_path, result.byte_len, id);
+            break :blk id;
+        };
+
+        const body = try packageFileUploadSuccessJson(allocator, input.path, result.stored_path, result.byte_len, activity_id);
+        defer allocator.free(body);
+        return jsonResponse(allocator, .ok, body);
+    }
+
+    if (std.mem.eql(u8, line.method, "POST")) {
+        if (parseInvokeWorkloadId(path)) |workload_id| {
+            var invoke_request = parseInvokeRequest(allocator, requestBody(request), config.policy) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_workload_invoke_request\"}");
+            };
+            defer invoke_request.deinit(allocator);
+
+            const body = try submitInvokeJobJson(
+                allocator,
+                workload_id,
+                invoke_request,
+                config.policy,
+                config.gpu,
+                config.accelerators,
+                shared_state,
+            );
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        } else |err| switch (err) {
+            error.NotInvokePath => {},
+            else => return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_workload_invoke_path\"}"),
+        }
+
+        if (parseCancelJobId(path)) |job_id| {
+            const body = blk: {
+                const io = std.Options.debug_io;
+                shared_state.mutex.lockUncancelable(io);
+                defer shared_state.mutex.unlock(io);
+                break :blk try cancelJobJson(allocator, job_id, &shared_state.state);
+            };
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        } else |err| switch (err) {
+            error.NotJobCancelPath => {},
+            else => return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_job_cancel_path\"}"),
+        }
+    }
+
+    const io = std.Options.debug_io;
+    shared_state.mutex.lockUncancelable(io);
+    defer shared_state.mutex.unlock(io);
+    return responseForRequestWithState(allocator, request, config, &shared_state.state);
 }
 
 pub fn responseForRequestWithState(
@@ -409,6 +888,27 @@ pub fn responseForRequestWithState(
             return jsonResponse(allocator, .ok, body);
         }
 
+        if (std.mem.eql(u8, path, "/packages")) {
+            const body = try packagesJson(allocator, state.*);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/jobs")) {
+            const body = try jobsJson(allocator, state.*);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (parseJobId(path)) |job_id| {
+            const body = try jobJson(allocator, state.*, job_id);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        } else |err| switch (err) {
+            error.NotJobPath => {},
+            else => return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_job_path\"}"),
+        }
+
         return jsonResponse(allocator, .not_found, "{\"error\":\"not_found\"}");
     }
 
@@ -429,6 +929,17 @@ pub fn responseForRequestWithState(
             };
 
             const body = try workloadDeployJson(allocator, workload_path, config, state);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        }
+
+        if (std.mem.eql(u8, path, "/packages/files")) {
+            var input = parsePackageFileUploadRequest(allocator, requestBody(request), config.policy) catch {
+                return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_package_file_upload\"}");
+            };
+            defer input.deinit(allocator);
+
+            const body = try packageFileUploadJson(allocator, input, config, state);
             defer allocator.free(body);
             return jsonResponse(allocator, .ok, body);
         }
@@ -513,6 +1024,15 @@ pub fn responseForRequestWithState(
             else => return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_workload_invoke_path\"}"),
         }
 
+        if (parseCancelJobId(path)) |job_id| {
+            const body = try cancelJobJson(allocator, job_id, state);
+            defer allocator.free(body);
+            return jsonResponse(allocator, .ok, body);
+        } else |err| switch (err) {
+            error.NotJobCancelPath => {},
+            else => return jsonResponse(allocator, .bad_request, "{\"error\":\"invalid_job_cancel_path\"}"),
+        }
+
         return jsonResponse(allocator, .not_found, "{\"error\":\"not_found\"}");
     }
 
@@ -561,6 +1081,32 @@ const InvokeRequest = struct {
     fn deinit(self: *InvokeRequest, allocator: std.mem.Allocator) void {
         allocator.free(self.args);
         allocator.free(self.stdin);
+        self.* = undefined;
+    }
+
+    fn clone(self: InvokeRequest, allocator: std.mem.Allocator) !InvokeRequest {
+        const args = try allocator.dupe(u32, self.args);
+        errdefer allocator.free(args);
+
+        const stdin = try allocator.dupe(u8, self.stdin);
+        errdefer allocator.free(stdin);
+
+        return .{
+            .args = args,
+            .stdin = stdin,
+        };
+    }
+};
+
+const PackageFileUploadRequest = struct {
+    path: []const u8,
+    offset: u64,
+    data_hex: []const u8,
+    truncate: bool,
+
+    fn deinit(self: *PackageFileUploadRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.data_hex);
         self.* = undefined;
     }
 };
@@ -621,6 +1167,29 @@ fn parseInvokeWorkloadId(path: []const u8) !u64 {
     return std.fmt.parseInt(u64, id_text, 10) catch error.InvalidWorkloadId;
 }
 
+fn parseJobId(path: []const u8) !u64 {
+    const prefix = "/jobs/";
+    if (!std.mem.startsWith(u8, path, prefix)) return error.NotJobPath;
+    if (path.len <= prefix.len) return error.InvalidJobId;
+
+    const id_text = path[prefix.len..];
+    if (std.mem.indexOfScalar(u8, id_text, '/') != null) return error.InvalidJobId;
+    return std.fmt.parseInt(u64, id_text, 10) catch error.InvalidJobId;
+}
+
+fn parseCancelJobId(path: []const u8) !u64 {
+    const prefix = "/jobs/";
+    const suffix = "/cancel";
+
+    if (!std.mem.startsWith(u8, path, prefix)) return error.NotJobCancelPath;
+    if (!std.mem.endsWith(u8, path, suffix)) return error.NotJobCancelPath;
+    if (path.len <= prefix.len + suffix.len) return error.InvalidJobId;
+
+    const id_text = path[prefix.len .. path.len - suffix.len];
+    if (std.mem.indexOfScalar(u8, id_text, '/') != null) return error.InvalidJobId;
+    return std.fmt.parseInt(u64, id_text, 10) catch error.InvalidJobId;
+}
+
 fn parseInvokeRequest(
     allocator: std.mem.Allocator,
     body: []const u8,
@@ -654,6 +1223,43 @@ fn parseInvokeRequest(
     return .{
         .args = args,
         .stdin = stdin,
+    };
+}
+
+fn parsePackageFileUploadRequest(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    policy: RuntimePolicy,
+) !PackageFileUploadRequest {
+    if (body.len > policy.max_request_body_bytes) return error.PackageUploadRequestBodyTooLarge;
+
+    const path_value = try jsonStringField(body, "path");
+    try package_transfer.validateRelativePath(path_value);
+
+    const data_hex_value = try jsonStringField(body, "data_hex");
+    if (data_hex_value.len / 2 > policy.max_upload_chunk_bytes) return error.UploadChunkTooLarge;
+
+    const offset = jsonU64Field(body, "offset") catch |err| switch (err) {
+        error.MissingJsonField => 0,
+        else => return err,
+    };
+
+    const truncate = jsonBoolField(body, "truncate") catch |err| switch (err) {
+        error.MissingJsonField => false,
+        else => return err,
+    };
+
+    const path = try allocator.dupe(u8, path_value);
+    errdefer allocator.free(path);
+
+    const data_hex = try allocator.dupe(u8, data_hex_value);
+    errdefer allocator.free(data_hex);
+
+    return .{
+        .path = path,
+        .offset = offset,
+        .data_hex = data_hex,
+        .truncate = truncate,
     };
 }
 
@@ -901,6 +1507,31 @@ fn jsonF64Field(body: []const u8, field_name: []const u8) !f64 {
 fn jsonU64Field(body: []const u8, field_name: []const u8) !u64 {
     const raw = try jsonNumberField(body, field_name);
     return std.fmt.parseInt(u64, raw, 10) catch error.InvalidJsonNumber;
+}
+
+fn jsonBoolField(body: []const u8, field_name: []const u8) !bool {
+    var index: usize = 0;
+    while (index < body.len) {
+        if (body[index] != '"') {
+            index += 1;
+            continue;
+        }
+
+        const key_start = index + 1;
+        const key_end = try jsonStringEnd(body, key_start);
+        const key = body[key_start..key_end];
+        index = skipJsonWhitespace(body, key_end + 1);
+
+        if (index >= body.len or body[index] != ':') continue;
+        index = skipJsonWhitespace(body, index + 1);
+
+        if (!std.mem.eql(u8, key, field_name)) continue;
+        if (std.mem.startsWith(u8, body[index..], "true")) return true;
+        if (std.mem.startsWith(u8, body[index..], "false")) return false;
+        return error.ExpectedJsonBool;
+    }
+
+    return error.MissingJsonField;
 }
 
 fn jsonNumberField(body: []const u8, field_name: []const u8) ![]const u8 {
@@ -1300,6 +1931,29 @@ fn workloadDeployJson(
     return workloadDeploySuccessJson(allocator, registered, activity_id, false);
 }
 
+fn packageFileUploadJson(
+    allocator: std.mem.Allocator,
+    input: PackageFileUploadRequest,
+    config: Config,
+    state: *State,
+) ![]u8 {
+    var result = package_transfer.writeChunk(allocator, config.artifact_root, .{
+        .path = input.path,
+        .offset = input.offset,
+        .data_hex = input.data_hex,
+        .truncate = input.truncate,
+    }, config.policy.max_upload_chunk_bytes) catch |err| {
+        const activity_id = try state.record(allocator, .package_upload, .rejected, input.path, @errorName(err));
+        return packageFileUploadFailureJson(allocator, input.path, err, activity_id);
+    };
+    defer result.deinit(allocator);
+
+    const activity_id = try state.record(allocator, .package_upload, .accepted, input.path, "stored");
+    try state.recordUploadedFile(allocator, input.path, result.stored_path, result.byte_len, activity_id);
+
+    return packageFileUploadSuccessJson(allocator, input.path, result.stored_path, result.byte_len, activity_id);
+}
+
 fn workloadInvokeJson(
     allocator: std.mem.Allocator,
     workload_id: u64,
@@ -1328,6 +1982,73 @@ fn workloadInvokeJson(
     registered.activity_id = activity_id;
 
     return workloadInvokeSuccessJson(allocator, registered.*, result, activity_id);
+}
+
+fn submitInvokeJobJson(
+    allocator: std.mem.Allocator,
+    workload_id: u64,
+    request: InvokeRequest,
+    policy: RuntimePolicy,
+    gpu_caps: gpu.Capabilities,
+    accelerator_caps: accelerator.Capabilities,
+    shared_state: *SharedState,
+) ![]u8 {
+    var registered_copy: RegisteredWorkload = undefined;
+    var job_id: u64 = 0;
+
+    {
+        const io = std.Options.debug_io;
+        shared_state.mutex.lockUncancelable(io);
+        defer shared_state.mutex.unlock(io);
+
+        const registered = shared_state.state.findWorkloadById(workload_id) orelse {
+            return workloadInvokeMissingJson(allocator, workload_id);
+        };
+
+        registered_copy = try cloneRegisteredWorkload(allocator, registered.*);
+        errdefer registered_copy.deinit(allocator);
+
+        job_id = try shared_state.state.createInvokeJob(allocator, workload_id, monotonicNowNs());
+    }
+
+    const request_copy = try request.clone(allocator);
+    errdefer {
+        var owned_registered = registered_copy;
+        owned_registered.deinit(allocator);
+    }
+    errdefer {
+        var owned_request = request_copy;
+        owned_request.deinit(allocator);
+    }
+
+    const context = try allocator.create(InvokeJobContext);
+    errdefer allocator.destroy(context);
+
+    context.* = .{
+        .allocator = allocator,
+        .shared_state = shared_state,
+        .job_id = job_id,
+        .registered = registered_copy,
+        .request = request_copy,
+        .policy = policy,
+        .gpu_caps = gpu_caps,
+        .accelerator_caps = accelerator_caps,
+    };
+
+    const thread = std.Thread.spawn(.{}, handleInvokeJobThread, .{context}) catch |err| {
+        context.deinit();
+        allocator.destroy(context);
+        const io = std.Options.debug_io;
+        shared_state.mutex.lockUncancelable(io);
+        defer shared_state.mutex.unlock(io);
+        if (shared_state.state.findJobById(job_id)) |job| {
+            try job.setFailed(allocator, err, 0, monotonicNowNs());
+        }
+        return invokeJobAcceptedJson(allocator, job_id, workload_id, "failed_to_start");
+    };
+    thread.detach();
+
+    return invokeJobAcceptedJson(allocator, job_id, workload_id, "queued");
 }
 
 fn executeRegisteredWorkload(
@@ -1543,6 +2264,121 @@ fn workloadsJson(allocator: std.mem.Allocator, state: State) ![]u8 {
     try json.endArray();
     try json.endObject();
 
+    return try out.toOwnedSlice();
+}
+
+fn packagesJson(allocator: std.mem.Allocator, state: State) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("items");
+    try json.beginArray();
+    for (state.uploaded_files.items) |uploaded| {
+        try json.beginObject();
+        try json.objectField("path");
+        try json.write(uploaded.path);
+        try json.objectField("stored_path");
+        try json.write(uploaded.stored_path);
+        try json.objectField("byte_len");
+        try json.write(uploaded.byte_len);
+        try json.objectField("activity_id");
+        try json.write(uploaded.activity_id);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn jobsJson(allocator: std.mem.Allocator, state: State) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("items");
+    try json.beginArray();
+    for (state.invoke_jobs.items) |job| {
+        try writeInvokeJob(&json, job);
+    }
+    try json.endArray();
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn jobJson(allocator: std.mem.Allocator, state: State, job_id: u64) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("invoke_job");
+    try json.objectField("found");
+    var found = false;
+    for (state.invoke_jobs.items) |job| {
+        if (job.id != job_id) continue;
+        found = true;
+        try json.write(true);
+        try json.objectField("job");
+        try writeInvokeJob(&json, job);
+        break;
+    }
+    if (!found) {
+        try json.write(false);
+        try json.objectField("job_id");
+        try json.write(job_id);
+        try json.objectField("error");
+        try json.write("UnknownJob");
+    }
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn cancelJobJson(allocator: std.mem.Allocator, job_id: u64, state: *State) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("invoke_job_cancel");
+    try json.objectField("job_id");
+    try json.write(job_id);
+
+    const job = state.findJobById(job_id) orelse {
+        try json.objectField("accepted");
+        try json.write(false);
+        try json.objectField("error");
+        try json.write("UnknownJob");
+        try json.endObject();
+        return try out.toOwnedSlice();
+    };
+
+    switch (job.status) {
+        .queued, .running => {
+            job.status = .cancel_requested;
+            try json.objectField("accepted");
+            try json.write(true);
+            try json.objectField("status");
+            try json.write(invokeJobStatusName(job.status));
+        },
+        else => {
+            try json.objectField("accepted");
+            try json.write(false);
+            try json.objectField("status");
+            try json.write(invokeJobStatusName(job.status));
+            try json.objectField("error");
+            try json.write("JobAlreadyFinished");
+        },
+    }
+
+    try json.endObject();
     return try out.toOwnedSlice();
 }
 
@@ -2147,6 +2983,107 @@ fn writeRegisteredWorkload(json: *std.json.Stringify, registered: RegisteredWork
     try json.endObject();
 }
 
+fn writeInvokeJob(json: *std.json.Stringify, job: InvokeJob) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    try json.write(job.id);
+    try json.objectField("workload_id");
+    try json.write(job.workload_id);
+    try json.objectField("activity_id");
+    try json.write(job.activity_id);
+    try json.objectField("status");
+    try json.write(invokeJobStatusName(job.status));
+    try json.objectField("submitted_ns");
+    try json.write(job.submitted_ns);
+    try json.objectField("started_ns");
+    try json.write(job.started_ns);
+    try json.objectField("finished_ns");
+    try json.write(job.finished_ns);
+    try json.objectField("duration_ns");
+    try json.write(job.duration_ns);
+    try json.objectField("memory_bytes");
+    try json.write(job.memory_bytes);
+    try json.objectField("exit_code");
+    try json.write(job.exit_code orelse 0);
+    try json.objectField("exit_code_present");
+    try json.write(job.exit_code != null);
+    try json.objectField("stdout");
+    try json.write(job.stdout);
+    try json.objectField("stderr");
+    try json.write(job.stderr);
+    try json.objectField("error");
+    try json.write(job.error_name);
+    try json.objectField("result");
+    try writeWasmValue(json, job.result);
+    try json.endObject();
+}
+
+fn packageFileUploadFailureJson(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    err: anyerror,
+    activity_id: u64,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("package_file_upload");
+    try json.objectField("activity_id");
+    try json.write(activity_id);
+    try json.objectField("uploaded");
+    try json.write(false);
+    try json.objectField("path");
+    try json.write(path);
+    try json.objectField("error");
+    try json.write(@errorName(err));
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn packageFileUploadSuccessJson(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    stored_path: []const u8,
+    byte_len: usize,
+    activity_id: u64,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("package_file_upload");
+    try json.objectField("activity_id");
+    try json.write(activity_id);
+    try json.objectField("uploaded");
+    try json.write(true);
+    try json.objectField("path");
+    try json.write(path);
+    try json.objectField("stored_path");
+    try json.write(stored_path);
+    try json.objectField("byte_len");
+    try json.write(byte_len);
+    try json.objectField("workload_path_hint");
+    if (workloadDirectoryHint(path, stored_path)) |hint| {
+        try json.write(hint);
+    } else {
+        try json.write(null);
+    }
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn workloadDirectoryHint(relative_path: []const u8, stored_path: []const u8) ?[]const u8 {
+    if (!std.mem.endsWith(u8, relative_path, "/" ++ workload.manifest_file_name)) return null;
+    return std.fs.path.dirname(stored_path);
+}
+
 fn workloadInvokeMissingJson(allocator: std.mem.Allocator, workload_id: u64) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -2163,6 +3100,38 @@ fn workloadInvokeMissingJson(allocator: std.mem.Allocator, workload_id: u64) ![]
     try json.write("missing");
     try json.objectField("error");
     try json.write("UnknownWorkload");
+    try json.endObject();
+
+    return try out.toOwnedSlice();
+}
+
+fn invokeJobAcceptedJson(
+    allocator: std.mem.Allocator,
+    job_id: u64,
+    workload_id: u64,
+    status: []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("kind");
+    try json.write("workload_invoke");
+    try json.objectField("workload_id");
+    try json.write(workload_id);
+    try json.objectField("job_id");
+    try json.write(job_id);
+    try json.objectField("invoked");
+    try json.write(false);
+    try json.objectField("job");
+    try json.write(true);
+    try json.objectField("status");
+    try json.write(status);
+    try json.objectField("status_path");
+    const status_path = try std.fmt.allocPrint(allocator, "/jobs/{d}", .{job_id});
+    defer allocator.free(status_path);
+    try json.write(status_path);
     try json.endObject();
 
     return try out.toOwnedSlice();
@@ -2632,6 +3601,7 @@ fn activityKindName(kind: ActivityKind) []const u8 {
         .workload_check => "workload_check",
         .workload_deploy => "workload_deploy",
         .workload_invoke => "workload_invoke",
+        .package_upload => "package_upload",
     };
 }
 
@@ -2648,6 +3618,16 @@ fn workloadStatusName(status: WorkloadStatus) []const u8 {
         .accepted => "accepted",
         .loaded => "loaded",
         .failed => "failed",
+    };
+}
+
+fn invokeJobStatusName(status: InvokeJobStatus) []const u8 {
+    return switch (status) {
+        .queued => "queued",
+        .running => "running",
+        .completed => "completed",
+        .failed => "failed",
+        .cancel_requested => "cancel_requested",
     };
 }
 
@@ -2709,6 +3689,9 @@ pub fn capabilitiesJson(allocator: std.mem.Allocator, config: Config) ![]u8 {
 
     try json.objectField("telemetry");
     try writeTelemetryCapabilities(&json);
+
+    try json.objectField("package_transfer");
+    try writePackageTransferCapabilities(&json, config);
 
     try json.objectField("policy");
     try writeRuntimePolicy(&json, config.policy);
@@ -2800,6 +3783,28 @@ fn writeRuntimePolicy(json: *std.json.Stringify, policy: RuntimePolicy) !void {
     try json.write(policy.max_stderr_bytes);
     try json.objectField("max_invoke_duration_ns");
     try json.write(policy.max_invoke_duration_ns);
+    try json.objectField("max_upload_chunk_bytes");
+    try json.write(policy.max_upload_chunk_bytes);
+    try json.endObject();
+}
+
+fn writePackageTransferCapabilities(json: *std.json.Stringify, config: Config) !void {
+    try json.beginObject();
+    try json.objectField("enabled");
+    try json.write(true);
+    try json.objectField("storage");
+    try json.write("filesystem");
+    try json.objectField("artifact_root");
+    try json.write(config.artifact_root);
+    try json.objectField("encoding");
+    try json.write("hex");
+    try json.objectField("max_chunk_bytes");
+    try json.write(config.policy.max_upload_chunk_bytes);
+    try json.objectField("endpoints");
+    try json.beginArray();
+    try json.write("GET /packages");
+    try json.write("POST /packages/files");
+    try json.endArray();
     try json.endObject();
 }
 
@@ -2983,6 +3988,8 @@ test "agent capabilities JSON exposes profile resources and networking" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"planned\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"telemetry\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"POST /telemetry/events\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"package_transfer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"POST /packages/files\"") != null);
 }
 
 test "agent HTTP responses route health capabilities and not found" {
@@ -3071,6 +4078,7 @@ test "agent workload registry lists registered workloads" {
     defer state.deinit(std.testing.allocator);
 
     const activity_id = try state.record(std.testing.allocator, .workload_deploy, .accepted, "workloads/demo", "accepted");
+
     const workload_id = try state.registerWorkload(std.testing.allocator, .{
         .path = "workloads/demo",
         .name = "demo",
@@ -3285,6 +4293,27 @@ test "agent workload invoke reports missing workload" {
     try std.testing.expect(std.mem.indexOf(u8, response, "\"status\":\"missing\"") != null);
 }
 
+test "agent invoke job registry exposes queued jobs" {
+    var state = State{};
+    defer state.deinit(std.testing.allocator);
+
+    const job_id = try state.createInvokeJob(std.testing.allocator, 7, 100);
+
+    const response = try responseForRequestWithState(
+        std.testing.allocator,
+        "GET /jobs/1 HTTP/1.1\r\nhost: local\r\n\r\n",
+        .{},
+        &state,
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(u64, 1), job_id);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"kind\":\"invoke_job\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"found\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"workload_id\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"status\":\"queued\"") != null);
+}
+
 test "agent parses invoke args and stdin" {
     var parsed = try parseInvokeRequest(
         std.testing.allocator,
@@ -3303,6 +4332,41 @@ test "agent parses invoke args and stdin" {
     defer empty.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty.args.len);
     try std.testing.expectEqualStrings("", empty.stdin);
+}
+
+test "agent parses package file upload requests" {
+    var parsed = try parsePackageFileUploadRequest(
+        std.testing.allocator,
+        \\{"path":"workloads/demo/model.onnx","offset":4,"data_hex":"68656c6c6f","truncate":true}
+    ,
+        .{},
+    );
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("workloads/demo/model.onnx", parsed.path);
+    try std.testing.expectEqual(@as(u64, 4), parsed.offset);
+    try std.testing.expectEqualStrings("68656c6c6f", parsed.data_hex);
+    try std.testing.expect(parsed.truncate);
+
+    try std.testing.expectError(
+        error.InvalidUploadPath,
+        parsePackageFileUploadRequest(
+            std.testing.allocator,
+            \\{"path":"../model.onnx","data_hex":"00"}
+        ,
+            .{},
+        ),
+    );
+
+    try std.testing.expectError(
+        error.UploadChunkTooLarge,
+        parsePackageFileUploadRequest(
+            std.testing.allocator,
+            \\{"path":"workloads/demo/model.onnx","data_hex":"000102"}
+        ,
+            .{ .max_upload_chunk_bytes = 2 },
+        ),
+    );
 }
 
 test "agent parses telemetry payloads" {
@@ -3367,6 +4431,14 @@ test "agent parses workload invoke path" {
     try std.testing.expectEqual(@as(u64, 7), try parseInvokeWorkloadId("/workloads/7/invoke"));
     try std.testing.expectError(error.NotInvokePath, parseInvokeWorkloadId("/workloads"));
     try std.testing.expectError(error.InvalidWorkloadId, parseInvokeWorkloadId("/workloads/nope/invoke"));
+}
+
+test "agent parses job paths" {
+    try std.testing.expectEqual(@as(u64, 11), try parseJobId("/jobs/11"));
+    try std.testing.expectEqual(@as(u64, 11), try parseCancelJobId("/jobs/11/cancel"));
+    try std.testing.expectError(error.NotJobPath, parseJobId("/workloads/11"));
+    try std.testing.expectError(error.InvalidJobId, parseJobId("/jobs/nope"));
+    try std.testing.expectError(error.NotJobCancelPath, parseCancelJobId("/jobs/11"));
 }
 
 test "agent parses workload check body path" {
