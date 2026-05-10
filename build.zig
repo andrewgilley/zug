@@ -206,6 +206,22 @@ pub fn build(b: *std.Build) void {
 
     workload_runner_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
 
+    const component_wit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/component/wit.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const wit_generator_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wit_generator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const wasi_nn_abi_module = b.createModule(.{
         .root_source_file = b.path("src/wasi_nn_abi.zig"),
         .target = target,
@@ -250,6 +266,8 @@ pub fn build(b: *std.Build) void {
     const run_agent_tests = b.addRunArtifact(agent_tests);
     const run_workload_tests = b.addRunArtifact(workload_tests);
     const run_workload_runner_tests = b.addRunArtifact(workload_runner_tests);
+    const run_component_wit_tests = b.addRunArtifact(component_wit_tests);
+    const run_wit_generator_tests = b.addRunArtifact(wit_generator_tests);
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
     const run_deployment_tests = b.addRunArtifact(deployment_tests);
 
@@ -270,6 +288,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_workload_tests.step);
     test_step.dependOn(&run_workload_runner_tests.step);
+    test_step.dependOn(&run_component_wit_tests.step);
+    test_step.dependOn(&run_wit_generator_tests.step);
     test_step.dependOn(&run_wasm_tests.step);
     test_step.dependOn(&run_deployment_tests.step);
 
@@ -434,4 +454,13 @@ pub fn build(b: *std.Build) void {
     });
 
     gen_proto.dependOn(&protoc_step.step);
+
+    const gen_wit_run = b.addRunArtifact(exe);
+    gen_wit_run.addArg("wit");
+    gen_wit_run.addArg("edge-inference");
+    gen_wit_run.addArg("--out");
+    gen_wit_run.addArg("wit/edge-inference.wit");
+
+    const gen_wit = b.step("gen-wit", "generate WIT interface files from Zig descriptors");
+    gen_wit.dependOn(&gen_wit_run.step);
 }

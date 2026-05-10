@@ -47,6 +47,7 @@ interface inference {
   }
 
   type graph = u32;
+
   type context = u32;
 
   load-graph: func(
@@ -112,7 +113,9 @@ interface diagnostics {
 }
 
 interface log {
-  write: func(message: string);
+  write: func(
+    message: string,
+  );
 }
 
 world edge-guest {

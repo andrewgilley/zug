@@ -15,6 +15,7 @@ const network = @import("network.zig");
 const target_profile = @import("target.zig");
 const workload = @import("workload.zig");
 const workload_runner = @import("workload_runner.zig");
+const wit_generator = @import("wit_generator.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
 const wasm_compatibility = @import("wasm/compatibility.zig");
 const wasm_imports = @import("wasm/imports.zig");
@@ -39,6 +40,7 @@ const CliMode = enum {
     wasm,
     agent,
     upload,
+    wit,
 };
 
 const BenchFormat = enum {
@@ -79,6 +81,7 @@ const CliArgs = struct {
     upload_chunk_size: usize = 64 * 1024,
     run_profile_name: ?[]const u8 = null,
     wasm_stdin: ?[]const u8 = null,
+    wit_output_path: ?[]const u8 = null,
     mock_gpu: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
@@ -109,6 +112,9 @@ const CliArgs = struct {
         }
         if (self.wasm_stdin) |stdin| {
             allocator.free(stdin);
+        }
+        if (self.wit_output_path) |path| {
+            allocator.free(path);
         }
 
         for (self.inputs.items) |input| {
@@ -175,6 +181,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (cli.mode == .upload) {
         try runUpload(allocator, &cli);
+        return;
+    }
+
+    if (cli.mode == .wit) {
+        try wit_generator.run(allocator, .{
+            .descriptor = cli.model_path,
+            .out_path = cli.wit_output_path,
+        });
         return;
     }
 
@@ -546,6 +560,39 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !CliA
         return cli;
     }
 
+    if (std.mem.eql(u8, first_arg, "wit")) {
+        const descriptor_arg = args.next() orelse {
+            printUsage();
+            return error.MissingWitDescriptor;
+        };
+
+        var cli = CliArgs{
+            .mode = .wit,
+            .model_path = try allocator.dupe(u8, descriptor_arg),
+        };
+        errdefer cli.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--out")) {
+                const out_path = args.next() orelse {
+                    printUsage();
+                    return error.MissingWitOutputPath;
+                };
+
+                if (cli.wit_output_path) |old_path| {
+                    allocator.free(old_path);
+                }
+                cli.wit_output_path = try allocator.dupe(u8, out_path);
+                continue;
+            }
+
+            printUsage();
+            return error.UnknownArgument;
+        }
+
+        return cli;
+    }
+
     if (std.mem.eql(u8, first_arg, "bench")) {
         const model_arg = args.next() orelse {
             printUsage();
@@ -796,6 +843,7 @@ fn printUsage() void {
         \\  zug scope
         \\  zug agent [--node id] [--profile profile] [--listen ip:port] [--once] [--mock-gpu]
         \\  zug upload <workload/> --agent http://host:port [--deploy] [--chunk-size bytes]
+        \\  zug wit <descriptor> [--out file.wit]
         \\  zug run <workload/> [--profile profile] [--arg i32] [--stdin text] [--json] [--mock-gpu]
         \\  zug check <file.onnx|file.wasm|workload/> [--kind auto|onnx|wasm|workload] [--manifest manifest] [--model model.onnx] [--export name] [--memory bytes] [--json]
         \\  zug inspect <model.onnx>
@@ -828,6 +876,11 @@ fn printUsage() void {
         \\upload:
         \\  uploads zug.toml, the WASM module, and optional model into the agent artifact store
         \\  --deploy checks and registers the uploaded workload on the target agent
+        \\
+        \\wit:
+        \\  emits WebAssembly Component Model WIT from a Zig descriptor
+        \\  descriptors: edge-inference, src/component/edge_inference_wit.zig
+        \\  --out writes to a file instead of printing the WIT text
         \\
         \\agent:
         \\  serves GET /health, GET /capabilities, GET /activity, GET /workloads, GET /telemetry over HTTP
