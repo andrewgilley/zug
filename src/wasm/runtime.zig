@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const binary = @import("binary.zig");
+pub const component = @import("component.zig");
 pub const fixtures = @import("fixtures.zig");
 pub const imports = @import("imports.zig");
 pub const instance = @import("instance.zig");
@@ -19,6 +20,10 @@ pub const Runtime = struct {
 
     pub fn parseModule(self: Runtime, bytes: []const u8) !module.Module {
         return module.Module.parse(self.allocator, bytes);
+    }
+
+    pub fn parseComponent(self: Runtime, bytes: []const u8) !component.Component {
+        return component.Component.parse(self.allocator, bytes);
     }
 
     pub fn instantiate(

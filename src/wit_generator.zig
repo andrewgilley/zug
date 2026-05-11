@@ -1,5 +1,6 @@
 const std = @import("std");
 const wit = @import("component/wit.zig");
+const component_smoke = @import("component/component_smoke_wit.zig");
 const edge_inference = @import("component/edge_inference_wit.zig");
 
 pub const Options = struct {
@@ -32,6 +33,13 @@ pub fn renderDescriptorAlloc(allocator: std.mem.Allocator, descriptor: []const u
         return wit.renderAlloc(allocator, edge_inference.package);
     }
 
+    if (std.mem.eql(u8, descriptor, "component-smoke") or
+        std.mem.eql(u8, descriptor, "component_smoke") or
+        std.mem.eql(u8, base_name, "component_smoke_wit.zig"))
+    {
+        return wit.renderAlloc(allocator, component_smoke.package);
+    }
+
     return error.UnknownWitDescriptor;
 }
 
@@ -50,6 +58,26 @@ test "renders edge inference descriptor by descriptor path basename" {
     defer allocator.free(rendered);
 
     try std.testing.expect(std.mem.startsWith(u8, rendered, "package zug:edge-inference@0.1.0;"));
+}
+
+test "renders component smoke descriptor by stable name" {
+    const allocator = std.testing.allocator;
+    const rendered = try renderDescriptorAlloc(allocator, "component-smoke");
+    defer allocator.free(rendered);
+
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "package zug:component-smoke@0.1.0;"));
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "world component-smoke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "export run: func(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "value: s32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, ") -> s32;") != null);
+}
+
+test "renders component smoke descriptor by descriptor path basename" {
+    const allocator = std.testing.allocator;
+    const rendered = try renderDescriptorAlloc(allocator, "src/component/component_smoke_wit.zig");
+    defer allocator.free(rendered);
+
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "package zug:component-smoke@0.1.0;"));
 }
 
 test "checked-in edge inference WIT is generated from descriptor" {

@@ -6,6 +6,7 @@ const scope = @import("scope.zig");
 const target_profile = @import("target.zig");
 const workload = @import("workload.zig");
 const wasm_compatibility = @import("wasm/compatibility.zig");
+const wasm_component = @import("wasm/component.zig");
 const wasm_manifest = @import("wasm/manifest.zig");
 const wasm_module = @import("wasm/module.zig");
 
@@ -375,6 +376,10 @@ fn checkWorkloadPath(allocator: std.mem.Allocator, options: Options) !bool {
 }
 
 fn checkWasmBytes(allocator: std.mem.Allocator, options: Options, bytes: []const u8) !bool {
+    if (wasm_component.isComponent(bytes)) {
+        return checkComponentBytes(allocator, options, bytes);
+    }
+
     if (options.output_format == .text) {
         std.debug.print("zug check wasm\n", .{});
         std.debug.print("  file: {s}\n", .{options.artifact_path});
@@ -414,6 +419,160 @@ fn checkWasmBytes(allocator: std.mem.Allocator, options: Options, bytes: []const
         std.debug.print("  status: {s}\n", .{if (ok) "pass" else "fail"});
     }
     return ok;
+}
+
+fn checkComponentBytes(allocator: std.mem.Allocator, options: Options, bytes: []const u8) !bool {
+    var parsed = wasm_component.Component.parse(allocator, bytes) catch |err| {
+        if (options.output_format == .json) {
+            printComponentCheckJson(options.artifact_path, bytes.len, null, err);
+        } else {
+            std.debug.print("zug check wasm\n", .{});
+            std.debug.print("  file: {s}\n", .{options.artifact_path});
+            std.debug.print("  bytes: {d}\n", .{bytes.len});
+            std.debug.print("  format: component\n", .{});
+            std.debug.print("  parse: fail ({s})\n", .{@errorName(err)});
+            std.debug.print("  status: fail\n", .{});
+        }
+        return false;
+    };
+    defer parsed.deinit(allocator);
+
+    if (options.output_format == .json) {
+        printComponentCheckJson(options.artifact_path, bytes.len, parsed, null);
+    } else {
+        std.debug.print("zug check wasm\n", .{});
+        std.debug.print("  file: {s}\n", .{options.artifact_path});
+        std.debug.print("  bytes: {d}\n", .{bytes.len});
+        std.debug.print("  format: component\n", .{});
+        std.debug.print("  parse: pass\n", .{});
+        printComponentSectionCounts(parsed);
+        printComponentImports(parsed);
+        printComponentExports(parsed);
+        std.debug.print("  execution: unsupported (ComponentModelExecutionUnsupported)\n", .{});
+        if (options.manifest_path != null) {
+            std.debug.print("  manifest: skipped (component execution unsupported)\n", .{});
+        }
+        std.debug.print("  status: fail\n", .{});
+    }
+
+    return false;
+}
+
+fn printComponentSectionCounts(parsed: wasm_component.Component) void {
+    std.debug.print("  component_sections:\n", .{});
+    var any = false;
+    for (0..parsed.section_counts.len) |index| {
+        const count = parsed.section_counts[index];
+        if (count == 0) continue;
+
+        any = true;
+        const id: wasm_component.SectionId = @enumFromInt(index);
+        std.debug.print("    {s}: {d}\n", .{ wasm_component.sectionName(id), count });
+    }
+    if (!any) std.debug.print("    none\n", .{});
+}
+
+fn printComponentImports(parsed: wasm_component.Component) void {
+    std.debug.print("  component_imports: {d}\n", .{parsed.imports.items.len});
+    for (parsed.imports.items) |import| {
+        std.debug.print("    {s}: {s}", .{
+            import.name,
+            wasm_component.descName(import.desc),
+        });
+        if (wasm_component.descTypeIndex(import.desc)) |type_index| {
+            std.debug.print(" type={d}", .{type_index});
+        }
+        if (import.version) |version| {
+            std.debug.print(" version={s}", .{version});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+fn printComponentExports(parsed: wasm_component.Component) void {
+    std.debug.print("  component_exports: {d}\n", .{parsed.exports.items.len});
+    for (parsed.exports.items) |exported| {
+        std.debug.print("    {s}: {s} index={d}", .{
+            exported.name,
+            wasm_component.sortName(exported.sort_index.sort),
+            exported.sort_index.index,
+        });
+        if (exported.desc) |desc| {
+            std.debug.print(" desc={s}", .{wasm_component.descName(desc)});
+            if (wasm_component.descTypeIndex(desc)) |type_index| {
+                std.debug.print(" type={d}", .{type_index});
+            }
+        }
+        if (exported.version) |version| {
+            std.debug.print(" version={s}", .{version});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+fn printComponentCheckJson(
+    artifact_path: []const u8,
+    byte_len: usize,
+    parsed: ?wasm_component.Component,
+    parse_error: ?anyerror,
+) void {
+    std.debug.print("{{\"kind\":\"wasm\",\"file\":", .{});
+    printJsonString(artifact_path);
+    std.debug.print(",\"bytes\":{d},\"status\":\"fail\",\"component\":{{\"format\":\"component\",\"supported\":false,\"parse_error\":", .{byte_len});
+    printJsonError(parse_error);
+    std.debug.print(",\"execution_error\":\"ComponentModelExecutionUnsupported\",\"sections\":{{", .{});
+    if (parsed) |component| {
+        var first = true;
+        for (0..component.section_counts.len) |index| {
+            const count = component.section_counts[index];
+            if (count == 0) continue;
+            if (!first) std.debug.print(",", .{});
+            first = false;
+
+            const id: wasm_component.SectionId = @enumFromInt(index);
+            printJsonString(wasm_component.sectionName(id));
+            std.debug.print(":{d}", .{count});
+        }
+    }
+    std.debug.print("}},\"imports\":[", .{});
+    if (parsed) |component| {
+        for (component.imports.items, 0..) |import, index| {
+            if (index != 0) std.debug.print(",", .{});
+            std.debug.print("{{\"name\":", .{});
+            printJsonString(import.name);
+            std.debug.print(",\"kind\":", .{});
+            printJsonString(wasm_component.descName(import.desc));
+            std.debug.print(",\"type_index\":", .{});
+            printJsonOptionalU32(wasm_component.descTypeIndex(import.desc));
+            std.debug.print(",\"version\":", .{});
+            printJsonOptionalString(import.version);
+            std.debug.print("}}", .{});
+        }
+    }
+    std.debug.print("],\"exports\":[", .{});
+    if (parsed) |component| {
+        for (component.exports.items, 0..) |exported, index| {
+            if (index != 0) std.debug.print(",", .{});
+            std.debug.print("{{\"name\":", .{});
+            printJsonString(exported.name);
+            std.debug.print(",\"kind\":", .{});
+            printJsonString(wasm_component.sortName(exported.sort_index.sort));
+            std.debug.print(",\"index\":{d},\"version\":", .{exported.sort_index.index});
+            printJsonOptionalString(exported.version);
+            std.debug.print(",\"desc\":", .{});
+            if (exported.desc) |desc| {
+                std.debug.print("{{\"kind\":", .{});
+                printJsonString(wasm_component.descName(desc));
+                std.debug.print(",\"type_index\":", .{});
+                printJsonOptionalU32(wasm_component.descTypeIndex(desc));
+                std.debug.print("}}", .{});
+            } else {
+                std.debug.print("null", .{});
+            }
+            std.debug.print("}}", .{});
+        }
+    }
+    std.debug.print("]}}}}\n", .{});
 }
 
 fn printWasmCheckJson(
@@ -900,9 +1059,25 @@ fn printJsonString(value: []const u8) void {
     std.debug.print("\"", .{});
 }
 
+fn printJsonError(value: ?anyerror) void {
+    if (value) |actual| {
+        printJsonString(@errorName(actual));
+    } else {
+        std.debug.print("null", .{});
+    }
+}
+
 fn printJsonOptionalString(value: ?[]const u8) void {
     if (value) |actual| {
         printJsonString(actual);
+    } else {
+        std.debug.print("null", .{});
+    }
+}
+
+fn printJsonOptionalU32(value: ?u32) void {
+    if (value) |actual| {
+        std.debug.print("{d}", .{actual});
     } else {
         std.debug.print("null", .{});
     }

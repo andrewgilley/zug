@@ -254,11 +254,31 @@ fn renderWorld(writer: *std.Io.Writer, world: World) !void {
 fn renderWorldItem(writer: *std.Io.Writer, direction: []const u8, item: WorldItem) !void {
     switch (item) {
         .interface => |name| try writer.print("  {s} {s};\n", .{ direction, name }),
-        .function => |function| {
-            try writer.print("  {s} ", .{direction});
-            try renderFunction(writer, function, "");
-        },
+        .function => |function| try renderWorldFunction(writer, direction, function),
     }
+}
+
+fn renderWorldFunction(writer: *std.Io.Writer, direction: []const u8, function: Function) !void {
+    try writer.print("  {s} {s}: func(", .{ direction, function.name });
+
+    if (function.params.len == 0) {
+        try writer.writeAll(")");
+    } else {
+        try writer.writeAll("\n");
+        for (function.params) |param| {
+            try writer.print("    {s}: ", .{param.name});
+            try renderType(writer, param.ty);
+            try writer.writeAll(",\n");
+        }
+        try writer.writeAll("  )");
+    }
+
+    if (function.result) |result| {
+        try writer.writeAll(" -> ");
+        try renderType(writer, result);
+    }
+
+    try writer.writeAll(";\n");
 }
 
 fn renderType(writer: *std.Io.Writer, ty: Type) !void {

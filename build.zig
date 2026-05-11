@@ -240,6 +240,16 @@ pub fn build(b: *std.Build) void {
 
     wasm_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
 
+    const component_smoke_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/component_smoke_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    component_smoke_tests.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
     const deployment_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/deployment_tests.zig"),
@@ -269,6 +279,7 @@ pub fn build(b: *std.Build) void {
     const run_component_wit_tests = b.addRunArtifact(component_wit_tests);
     const run_wit_generator_tests = b.addRunArtifact(wit_generator_tests);
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    const run_component_smoke_tests = b.addRunArtifact(component_smoke_tests);
     const run_deployment_tests = b.addRunArtifact(deployment_tests);
 
     const test_step = b.step("test", "Run unit tests");
@@ -321,6 +332,22 @@ pub fn build(b: *std.Build) void {
 
     const guest_step = b.step("guest-basic", "Build the basic external wasm guest");
     guest_step.dependOn(&guest_basic.step);
+
+    const guest_component_smoke = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build-exe",
+        "guests/component_smoke.zig",
+        "-target",
+        "wasm32-freestanding",
+        "-O",
+        "ReleaseSmall",
+        "-fno-entry",
+        "-rdynamic",
+        "-femit-bin=zig-out/component_smoke.wasm",
+    });
+
+    const guest_component_smoke_step = b.step("guest-component-smoke", "Build the component smoke external wasm guest");
+    guest_component_smoke_step.dependOn(&guest_component_smoke.step);
 
     const guest_wasi_log = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -388,10 +415,26 @@ pub fn build(b: *std.Build) void {
 
     const guests_step = b.step("guests", "Build all external wasm guest fixtures");
     guests_step.dependOn(&guest_basic.step);
+    guests_step.dependOn(&guest_component_smoke.step);
     guests_step.dependOn(&guest_wasi_log.step);
     guests_step.dependOn(&guest_wasi_nn_smoke.step);
     guests_step.dependOn(&guest_wasi_nn_full.step);
     guests_step.dependOn(&guest_gpu_probe.step);
+
+    const gen_component_smoke_wit_run = b.addRunArtifact(exe);
+    gen_component_smoke_wit_run.addArg("wit");
+    gen_component_smoke_wit_run.addArg("component-smoke");
+    gen_component_smoke_wit_run.addArg("--out");
+    gen_component_smoke_wit_run.addArg("zig-out/component-smoke.wit");
+
+    const gen_component_smoke_wit = b.step("gen-component-smoke-wit", "Generate the component smoke WIT file");
+    gen_component_smoke_wit.dependOn(&gen_component_smoke_wit_run.step);
+
+    run_component_smoke_tests.step.dependOn(&guest_component_smoke.step);
+    run_component_smoke_tests.step.dependOn(&gen_component_smoke_wit_run.step);
+
+    const test_component_smoke_step = b.step("test-component-smoke", "Generate WIT, build a smoke guest, and run it through zug's WASM runtime");
+    test_component_smoke_step.dependOn(&run_component_smoke_tests.step);
 
     const run_basic_guest = b.addRunArtifact(exe);
     run_basic_guest.addArgs(&.{ "wasm", "zig-out/basic.wasm", "--arg", "7" });

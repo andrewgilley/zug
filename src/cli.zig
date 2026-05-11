@@ -879,7 +879,7 @@ fn printUsage() void {
         \\
         \\wit:
         \\  emits WebAssembly Component Model WIT from a Zig descriptor
-        \\  descriptors: edge-inference, src/component/edge_inference_wit.zig
+        \\  descriptors: edge-inference, component-smoke, src/component/edge_inference_wit.zig, src/component/component_smoke_wit.zig
         \\  --out writes to a file instead of printing the WIT text
         \\
         \\agent:
