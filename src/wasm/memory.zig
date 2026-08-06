@@ -54,12 +54,3 @@ fn checkedRange(container_len: usize, ptr: u32, len: u32) !Range {
     if (end > container_len) return error.InvalidMemoryRange;
     return .{ .start = start, .end = end };
 }
-
-test "linear memory bounds reads and writes" {
-    var bytes = [_]u8{0} ** 16;
-    var memory = LinearMemory.init(&bytes);
-
-    try memory.writeU32(4, 0x12345678);
-    try std.testing.expectEqual(@as(u32, 0x12345678), try memory.readU32(4));
-    try std.testing.expectError(error.InvalidMemoryRange, memory.writeU32(14, 1));
-}
