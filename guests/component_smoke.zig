@@ -1,3 +1,0 @@
-pub export fn run(value: i32) i32 {
-    return (value * 5) + 7;
-}
