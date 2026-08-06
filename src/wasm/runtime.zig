@@ -58,7 +58,6 @@ pub const Runtime = struct {
 
 test "runtime parses and instantiates an empty module" {
     const allocator = std.testing.allocator;
-
     const runtime = Runtime.init(allocator);
 
     var parsed = try runtime.parseModule("\x00asm\x01\x00\x00\x00");
@@ -73,7 +72,6 @@ test "runtime parses and instantiates an empty module" {
 
 test "runtime instantiates and runs module start function" {
     const allocator = std.testing.allocator;
-
     const runtime = Runtime.init(allocator);
 
     var parsed = try runtime.parseModule(fixtures.globals_and_start);
