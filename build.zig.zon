@@ -1,13 +1,8 @@
 .{
     .name = .zug,
     .version = "0.0.1",
-    .dependencies = .{
-        .protobuf = .{
-            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=master#1f6cb06156b3ff4f52f98bc14f829c0b8393a6fc",
-            .hash = "protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1",
-        },
-    },
+    .dependencies = .{},
     .minimum_zig_version = "0.16.0",
-    .paths = .{""},
+    .paths = .{ "build.zig", "build.zig.zon", "src", "guests", "README.md" },
     .fingerprint = 0x27b94ddc316fe984,
 }

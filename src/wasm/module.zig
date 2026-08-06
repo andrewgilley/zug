@@ -636,10 +636,10 @@ test "module parse decodes function imports" {
     const allocator = std.testing.allocator;
     const bytes =
         "\x00asm\x01\x00\x00\x00" ++
-        "\x02\x13" ++
+        "\x02\x0f" ++
         "\x01" ++
-        "\x07wasi_nn" ++
-        "\x07compute" ++
+        "\x03env" ++
+        "\x07host_fn" ++
         "\x00" ++
         "\x00";
 
@@ -647,8 +647,8 @@ test "module parse decodes function imports" {
     defer parsed.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), parsed.imports.items.len);
-    try std.testing.expectEqualStrings("wasi_nn", parsed.imports.items[0].module);
-    try std.testing.expectEqualStrings("compute", parsed.imports.items[0].name);
+    try std.testing.expectEqualStrings("env", parsed.imports.items[0].module);
+    try std.testing.expectEqualStrings("host_fn", parsed.imports.items[0].name);
     try std.testing.expectEqual(ImportKind.function, parsed.imports.items[0].kind);
     try std.testing.expectEqual(@as(?u32, 0), parsed.imports.items[0].type_index);
 }

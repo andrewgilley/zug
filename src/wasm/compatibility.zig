@@ -3,14 +3,13 @@ const binary = @import("binary.zig");
 const imports = @import("imports.zig");
 const module = @import("module.zig");
 const runtime = @import("runtime.zig");
-const scope = @import("../scope.zig");
 
 const wasm_page_size: usize = 64 * 1024;
 const supported_section_count = 13;
 
 pub const Target = struct {
-    default_memory_bytes: usize = scope.default_wasm_memory_bytes,
-    max_memory_bytes: usize = scope.max_wasm_memory_bytes,
+    default_memory_bytes: usize = 16 * 1024 * 1024,
+    max_memory_bytes: usize = 256 * 1024 * 1024,
 };
 
 pub const Options = struct {
@@ -1277,7 +1276,6 @@ fn minimumMemoryBytes(parsed: *const module.Module) !usize {
 
 fn wasiRequirementName(module_name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, module_name, imports.wasi_module_name)) return "wasi-preview1";
-    if (std.mem.eql(u8, module_name, imports.wasi_nn_module_name)) return "wasi-nn";
     if (std.mem.startsWith(u8, module_name, "wasi")) return "wasi-unknown";
 
     return null;

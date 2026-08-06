@@ -1,7 +1,7 @@
 const std = @import("std");
 const imports = @import("imports.zig");
+const memory_module = @import("memory.zig");
 const module = @import("module.zig");
-const wasi_nn_abi = @import("../wasi_nn_abi.zig");
 
 const wasm_page_size = 64 * 1024;
 const max_wasm_pages = 65536;
@@ -25,7 +25,7 @@ pub const Instance = struct {
     allocator: std.mem.Allocator,
     module: *const module.Module,
     memory_bytes: []u8,
-    memory: wasi_nn_abi.LinearMemory,
+    memory: memory_module.LinearMemory,
     import_resolver: ?*imports.Resolver = null,
     imported_functions: []imports.Function = &.{},
     globals: []RuntimeGlobal = &.{},
@@ -52,7 +52,7 @@ pub const Instance = struct {
             .allocator = allocator,
             .module = parsed_module,
             .memory_bytes = memory_bytes,
-            .memory = wasi_nn_abi.LinearMemory.init(memory_bytes),
+            .memory = memory_module.LinearMemory.init(memory_bytes),
         };
         errdefer result.deinit();
 
@@ -378,7 +378,7 @@ pub const Instance = struct {
         @memset(grown[old_len..], 0);
 
         self.memory_bytes = grown;
-        self.memory = wasi_nn_abi.LinearMemory.init(self.memory_bytes);
+        self.memory = memory_module.LinearMemory.init(self.memory_bytes);
 
         return old_pages;
     }
@@ -591,36 +591,6 @@ test "instance owns linear memory" {
 
     try instance.memory.writeU32(0, 42);
     try std.testing.expectEqual(@as(u32, 42), try instance.memory.readU32(0));
-}
-
-test "instance resolves wasi-nn function imports" {
-    const allocator = std.testing.allocator;
-
-    const bytes =
-        "\x00asm\x01\x00\x00\x00" ++
-        "\x02\x13" ++
-        "\x01" ++
-        "\x07wasi_nn" ++
-        "\x07compute" ++
-        "\x00" ++
-        "\x00";
-
-    var parsed = try module.Module.parse(allocator, bytes);
-    defer parsed.deinit(allocator);
-
-    var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
-    defer wasm_instance.deinit();
-
-    var host = wasi_nn_abi.Host.init(allocator);
-    defer host.deinit();
-
-    var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
-    var resolver = imports.Resolver.init(&surface);
-
-    try wasm_instance.bindImports(&resolver);
-
-    try std.testing.expectEqual(@as(usize, 1), wasm_instance.importedFunctionCount());
-    try std.testing.expectEqual(imports.Function.compute, try wasm_instance.importedFunction(0));
 }
 
 test "instance applies active data segments" {

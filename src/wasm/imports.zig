@@ -1,32 +1,9 @@
 const std = @import("std");
-const gpu = @import("../gpu.zig");
-const wasi_nn_abi = @import("../wasi_nn_abi.zig");
+const memory_module = @import("memory.zig");
 
-pub const wasi_nn_module_name = "wasi_nn";
-pub const zug_nn_module_name = "zug_nn";
-pub const zug_gpu_module_name = "zug_gpu";
 pub const wasi_module_name = "wasi_snapshot_preview1";
 
 pub const Function = enum {
-    load_graph,
-    load_preloaded_graph,
-    init_execution_context,
-    set_input_by_index,
-    compute,
-    get_output_descriptor,
-    get_output,
-    gpu_device_count,
-    gpu_device_kind,
-    gpu_device_memory,
-    gpu_device_queue_count,
-    gpu_select_device,
-    gpu_selected_device,
-    gpu_open_device,
-    gpu_default_queue,
-    gpu_create_buffer,
-    gpu_write_buffer,
-    gpu_read_buffer,
-    gpu_dispatch_compute_stub,
     args_sizes_get,
     args_get,
     environ_sizes_get,
@@ -87,9 +64,8 @@ const DirectoryEntry = struct {
 };
 
 pub const Resolver = struct {
-    surface: ?*wasi_nn_abi.Surface = null,
     allocator: ?std.mem.Allocator = null,
-    memory: ?*wasi_nn_abi.LinearMemory = null,
+    memory: ?*memory_module.LinearMemory = null,
     args: []const []const u8 = &.{},
     environ: []const []const u8 = &.{},
     stdin: []const u8 = &.{},
@@ -100,26 +76,15 @@ pub const Resolver = struct {
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     exit_code: ?u32 = null,
-    gpu: gpu.Capabilities = .{},
-    gpu_runtime: gpu.Runtime = .{},
-    selected_gpu_index: ?u32 = null,
     fallback_clock_ns: u64 = 1,
 
-    pub fn init(surface: *wasi_nn_abi.Surface) Resolver {
-        return .{
-            .surface = surface,
-            .allocator = surface.allocator,
-            .memory = surface.memory,
-        };
-    }
-
-    pub fn initWasi(allocator: std.mem.Allocator, memory: *wasi_nn_abi.LinearMemory) Resolver {
+    pub fn initWasi(allocator: std.mem.Allocator, memory: *memory_module.LinearMemory) Resolver {
         return initWasiConfig(allocator, memory, .{});
     }
 
     pub fn initWasiConfig(
         allocator: std.mem.Allocator,
-        memory: *wasi_nn_abi.LinearMemory,
+        memory: *memory_module.LinearMemory,
         config: WasiConfig,
     ) Resolver {
         return .{
@@ -138,46 +103,11 @@ pub const Resolver = struct {
             self.open_files.deinit(allocator);
             self.stdout.deinit(allocator);
             self.stderr.deinit(allocator);
-            self.gpu_runtime.deinit(allocator);
         }
         self.* = undefined;
     }
 
     pub fn resolve(module_name: []const u8, function_name: []const u8) ?Function {
-        if (std.mem.eql(u8, module_name, wasi_nn_module_name)) {
-            if (std.mem.eql(u8, function_name, "load_graph")) return .load_graph;
-            if (std.mem.eql(u8, function_name, "init_execution_context")) return .init_execution_context;
-            if (std.mem.eql(u8, function_name, "set_input_by_index")) return .set_input_by_index;
-            if (std.mem.eql(u8, function_name, "compute")) return .compute;
-            if (std.mem.eql(u8, function_name, "get_output_descriptor")) return .get_output_descriptor;
-            if (std.mem.eql(u8, function_name, "get_output")) return .get_output;
-
-            return null;
-        }
-
-        if (std.mem.eql(u8, module_name, zug_nn_module_name)) {
-            if (std.mem.eql(u8, function_name, "load_preloaded_graph")) return .load_preloaded_graph;
-
-            return null;
-        }
-
-        if (std.mem.eql(u8, module_name, zug_gpu_module_name)) {
-            if (std.mem.eql(u8, function_name, "device_count")) return .gpu_device_count;
-            if (std.mem.eql(u8, function_name, "device_kind")) return .gpu_device_kind;
-            if (std.mem.eql(u8, function_name, "device_memory")) return .gpu_device_memory;
-            if (std.mem.eql(u8, function_name, "device_queue_count")) return .gpu_device_queue_count;
-            if (std.mem.eql(u8, function_name, "select_device")) return .gpu_select_device;
-            if (std.mem.eql(u8, function_name, "selected_device")) return .gpu_selected_device;
-            if (std.mem.eql(u8, function_name, "open_device")) return .gpu_open_device;
-            if (std.mem.eql(u8, function_name, "default_queue")) return .gpu_default_queue;
-            if (std.mem.eql(u8, function_name, "create_buffer")) return .gpu_create_buffer;
-            if (std.mem.eql(u8, function_name, "write_buffer")) return .gpu_write_buffer;
-            if (std.mem.eql(u8, function_name, "read_buffer")) return .gpu_read_buffer;
-            if (std.mem.eql(u8, function_name, "dispatch_compute_stub")) return .gpu_dispatch_compute_stub;
-
-            return null;
-        }
-
         if (std.mem.eql(u8, module_name, wasi_module_name)) {
             if (std.mem.eql(u8, function_name, "args_sizes_get")) return .args_sizes_get;
             if (std.mem.eql(u8, function_name, "args_get")) return .args_get;
@@ -205,89 +135,7 @@ pub const Resolver = struct {
     }
 
     pub fn call(self: *Resolver, function: Function, args: []const Arg) u32 {
-        const status = switch (function) {
-            .load_graph => blk: {
-                if (args.len != 5) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.loadGraph(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[2]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[3]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[4]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .load_preloaded_graph => blk: {
-                if (args.len != 3) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.loadPreloadedGraph(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[2]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .init_execution_context => blk: {
-                if (args.len != 2) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.initExecutionContext(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .set_input_by_index => blk: {
-                if (args.len != 7) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.setInputByIndex(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[2]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[3]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[4]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[5]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[6]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .compute => blk: {
-                if (args.len != 1) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.compute(argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error);
-            },
-            .get_output_descriptor => blk: {
-                if (args.len != 7) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.getOutputDescriptor(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[2]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[3]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[4]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[5]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[6]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .get_output => blk: {
-                if (args.len != 5) break :blk wasi_nn_abi.Status.runtime_error;
-                const surface = self.surface orelse break :blk wasi_nn_abi.Status.runtime_error;
-                break :blk surface.getOutput(
-                    argAsI32(args[0]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[1]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[2]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[3]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                    argAsI32(args[4]) catch break :blk wasi_nn_abi.Status.runtime_error,
-                );
-            },
-            .gpu_device_count => return self.gpuDeviceCount(args),
-            .gpu_device_kind => return self.gpuDeviceKind(args),
-            .gpu_device_memory => return self.gpuDeviceMemory(args),
-            .gpu_device_queue_count => return self.gpuDeviceQueueCount(args),
-            .gpu_select_device => return self.gpuSelectDevice(args),
-            .gpu_selected_device => return self.gpuSelectedDevice(args),
-            .gpu_open_device => return self.gpuOpenDevice(args),
-            .gpu_default_queue => return self.gpuDefaultQueue(args),
-            .gpu_create_buffer => return self.gpuCreateBuffer(args),
-            .gpu_write_buffer => return self.gpuWriteBuffer(args),
-            .gpu_read_buffer => return self.gpuReadBuffer(args),
-            .gpu_dispatch_compute_stub => return self.gpuDispatchComputeStub(args),
+        return switch (function) {
             .args_sizes_get => return self.argsSizesGet(args),
             .args_get => return self.argsGet(args),
             .environ_sizes_get => return self.environSizesGet(args),
@@ -311,140 +159,6 @@ pub const Resolver = struct {
                 return 0;
             },
         };
-
-        return @intFromEnum(status);
-    }
-
-    fn gpuDeviceCount(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 0) return 0;
-        return std.math.cast(u32, self.gpu.deviceCount()) orelse std.math.maxInt(u32);
-    }
-
-    fn gpuDeviceKind(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 1) return gpuInvalidDevice;
-        const index = argAsI32(args[0]) catch return gpuInvalidDevice;
-        const device = self.gpu.device(index) orelse return gpuInvalidDevice;
-        return @intFromEnum(device.kind);
-    }
-
-    fn gpuDeviceMemory(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 3) return wasiErrnoInval;
-        const index = argAsI32(args[0]) catch return wasiErrnoInval;
-        const total_ptr = argAsI32(args[1]) catch return wasiErrnoInval;
-        const available_ptr = argAsI32(args[2]) catch return wasiErrnoInval;
-        const memory = self.memory orelse return wasiErrnoFault;
-        const device = self.gpu.device(index) orelse return wasiErrnoNoent;
-
-        memory.writeU64(total_ptr, device.total_memory_bytes) catch return wasiErrnoFault;
-        memory.writeU64(available_ptr, device.available_memory_bytes) catch return wasiErrnoFault;
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuDeviceQueueCount(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 1) return gpuInvalidDevice;
-        const index = argAsI32(args[0]) catch return gpuInvalidDevice;
-        const device = self.gpu.device(index) orelse return gpuInvalidDevice;
-        return device.queue_count;
-    }
-
-    fn gpuSelectDevice(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 1) return wasiErrnoInval;
-        const index = argAsI32(args[0]) catch return wasiErrnoInval;
-        _ = self.gpu.device(index) orelse return wasiErrnoNoent;
-        self.selected_gpu_index = index;
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuSelectedDevice(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 0) return gpuInvalidDevice;
-        return self.selected_gpu_index orelse gpuInvalidDevice;
-    }
-
-    fn gpuOpenDevice(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 2) return wasiErrnoInval;
-        const index = argAsI32(args[0]) catch return wasiErrnoInval;
-        const out_device_handle_ptr = argAsI32(args[1]) catch return wasiErrnoInval;
-        const allocator = self.allocator orelse return wasiErrnoFault;
-        const memory = self.memory orelse return wasiErrnoFault;
-
-        const handle = self.gpu_runtime.openDevice(allocator, self.gpu, index) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        memory.writeU32(out_device_handle_ptr, handle) catch return wasiErrnoFault;
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuDefaultQueue(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 2) return wasiErrnoInval;
-        const device_handle = argAsI32(args[0]) catch return wasiErrnoInval;
-        const out_queue_handle_ptr = argAsI32(args[1]) catch return wasiErrnoInval;
-        const allocator = self.allocator orelse return wasiErrnoFault;
-        const memory = self.memory orelse return wasiErrnoFault;
-
-        const handle = self.gpu_runtime.defaultQueue(allocator, self.gpu, device_handle) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        memory.writeU32(out_queue_handle_ptr, handle) catch return wasiErrnoFault;
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuCreateBuffer(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 3) return wasiErrnoInval;
-        const device_handle = argAsI32(args[0]) catch return wasiErrnoInval;
-        const size = argAsI32(args[1]) catch return wasiErrnoInval;
-        const out_buffer_handle_ptr = argAsI32(args[2]) catch return wasiErrnoInval;
-        const allocator = self.allocator orelse return wasiErrnoFault;
-        const memory = self.memory orelse return wasiErrnoFault;
-
-        const handle = self.gpu_runtime.createBuffer(allocator, self.gpu, device_handle, size) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        memory.writeU32(out_buffer_handle_ptr, handle) catch return wasiErrnoFault;
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuWriteBuffer(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 4) return wasiErrnoInval;
-        const buffer_handle = argAsI32(args[0]) catch return wasiErrnoInval;
-        const offset = argAsI32(args[1]) catch return wasiErrnoInval;
-        const src_ptr = argAsI32(args[2]) catch return wasiErrnoInval;
-        const len = argAsI32(args[3]) catch return wasiErrnoInval;
-        const memory = self.memory orelse return wasiErrnoFault;
-        const data = memory.read(src_ptr, len) catch return wasiErrnoFault;
-
-        self.gpu_runtime.writeBuffer(buffer_handle, offset, data) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuReadBuffer(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 4) return wasiErrnoInval;
-        const buffer_handle = argAsI32(args[0]) catch return wasiErrnoInval;
-        const offset = argAsI32(args[1]) catch return wasiErrnoInval;
-        const dst_ptr = argAsI32(args[2]) catch return wasiErrnoInval;
-        const len = argAsI32(args[3]) catch return wasiErrnoInval;
-        const memory = self.memory orelse return wasiErrnoFault;
-        const out = memory.writeSlice(dst_ptr, len) catch return wasiErrnoFault;
-
-        self.gpu_runtime.readBuffer(buffer_handle, offset, out) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        return wasiErrnoSuccess;
-    }
-
-    fn gpuDispatchComputeStub(self: *Resolver, args: []const Arg) u32 {
-        if (args.len != 5) return wasiErrnoInval;
-        const queue_handle = argAsI32(args[0]) catch return wasiErrnoInval;
-        const buffer_handle = argAsI32(args[1]) catch return wasiErrnoInval;
-        const workgroup_x = argAsI32(args[2]) catch return wasiErrnoInval;
-        const workgroup_y = argAsI32(args[3]) catch return wasiErrnoInval;
-        const workgroup_z = argAsI32(args[4]) catch return wasiErrnoInval;
-
-        self.gpu_runtime.dispatchComputeStub(queue_handle, buffer_handle, workgroup_x, workgroup_y, workgroup_z) catch |err| {
-            return errnoFromGpuError(err);
-        };
-        return wasiErrnoSuccess;
     }
 
     fn argsSizesGet(self: *Resolver, args: []const Arg) u32 {
@@ -868,7 +582,7 @@ fn argAsI64(arg: Arg) !u64 {
 }
 
 fn writeStringListSizes(
-    memory: *wasi_nn_abi.LinearMemory,
+    memory: *memory_module.LinearMemory,
     values: []const []const u8,
     args: []const Arg,
 ) !u32 {
@@ -884,7 +598,7 @@ fn writeStringListSizes(
 }
 
 fn writeStringList(
-    memory: *wasi_nn_abi.LinearMemory,
+    memory: *memory_module.LinearMemory,
     values: []const []const u8,
     args: []const Arg,
 ) !u32 {
@@ -919,7 +633,7 @@ fn stringListByteLen(values: []const []const u8) !u32 {
 }
 
 fn readSourceIntoIovs(
-    memory: *wasi_nn_abi.LinearMemory,
+    memory: *memory_module.LinearMemory,
     source: []const u8,
     source_offset: *usize,
     iovs_ptr: u32,
@@ -953,7 +667,7 @@ fn readSourceIntoIovs(
     return wasiErrnoSuccess;
 }
 
-fn readGuestPath(memory: *wasi_nn_abi.LinearMemory, path_ptr: u32, path_len: u32) ![]const u8 {
+fn readGuestPath(memory: *memory_module.LinearMemory, path_ptr: u32, path_len: u32) ![]const u8 {
     return try memory.read(path_ptr, path_len);
 }
 
@@ -1051,7 +765,7 @@ fn hasDirectoryEntry(entries: []const DirectoryEntry, name: []const u8) bool {
 }
 
 fn writeDirent(
-    memory: *wasi_nn_abi.LinearMemory,
+    memory: *memory_module.LinearMemory,
     ptr: u32,
     next_cookie: usize,
     entry: DirectoryEntry,
@@ -1069,7 +783,7 @@ fn rightsAreReadonly(rights: u64) bool {
     return (rights & ~wasiReadonlyAllowedRights) == 0;
 }
 
-fn writeFdstat(memory: *wasi_nn_abi.LinearMemory, stat_ptr: u32, filetype: u8, rights: u64) !void {
+fn writeFdstat(memory: *memory_module.LinearMemory, stat_ptr: u32, filetype: u8, rights: u64) !void {
     var stat = [_]u8{0} ** 24;
     stat[0] = filetype;
     writeU16Little(stat[2..4], 0);
@@ -1079,7 +793,7 @@ fn writeFdstat(memory: *wasi_nn_abi.LinearMemory, stat_ptr: u32, filetype: u8, r
 }
 
 fn writeFilestat(
-    memory: *wasi_nn_abi.LinearMemory,
+    memory: *memory_module.LinearMemory,
     stat_ptr: u32,
     filetype: u8,
     size: usize,
@@ -1099,27 +813,6 @@ fn errnoFromMemoryError(err: anyerror) u32 {
         error.InvalidWasiArgType,
         error.InvalidWasiStringList,
         => wasiErrnoInval,
-        else => wasiErrnoIo,
-    };
-}
-
-fn errnoFromGpuError(err: anyerror) u32 {
-    return switch (err) {
-        error.InvalidDevice,
-        error.InvalidDeviceHandle,
-        error.InvalidQueueHandle,
-        error.InvalidBufferHandle,
-        error.QueueUnavailable,
-        => wasiErrnoNoent,
-        error.InvalidSize,
-        error.InvalidRange,
-        error.DeviceMemoryExceeded,
-        error.BufferTooLarge,
-        error.DeviceMismatch,
-        error.InvalidWorkgroupCount,
-        => wasiErrnoInval,
-        error.OutOfMemory => wasiErrnoNomem,
-        error.ResourceLimit => wasiErrnoOverflow,
         else => wasiErrnoIo,
     };
 }
@@ -1169,7 +862,6 @@ const wasiErrnoNoent = 44;
 const wasiErrnoNomem = 48;
 const wasiErrnoNotdir = 54;
 const wasiErrnoOverflow = 61;
-const gpuInvalidDevice = std.math.maxInt(u32);
 
 const wasiFiletypeCharacterDevice = 2;
 const wasiFiletypeDirectory = 3;
@@ -1194,13 +886,6 @@ const wasiDirectoryRights = wasiRightFdReaddir |
 
 const wasiReadonlyAllowedRights = wasiReadonlyFileRights | wasiDirectoryRights;
 
-test "resolver maps wasi-nn import names" {
-    try std.testing.expectEqual(Function.load_graph, Resolver.resolve("wasi_nn", "load_graph").?);
-    try std.testing.expectEqual(Function.compute, Resolver.resolve("wasi_nn", "compute").?);
-    try std.testing.expectEqual(Function.load_preloaded_graph, Resolver.resolve("zug_nn", "load_preloaded_graph").?);
-    try std.testing.expect(Resolver.resolve("env", "compute") == null);
-}
-
 test "resolver maps wasi imports" {
     try std.testing.expectEqual(Function.args_sizes_get, Resolver.resolve(wasi_module_name, "args_sizes_get").?);
     try std.testing.expectEqual(Function.args_get, Resolver.resolve(wasi_module_name, "args_get").?);
@@ -1224,7 +909,7 @@ test "resolver maps wasi imports" {
 
 test "resolver records proc_exit code" {
     var memory_bytes = [_]u8{0} ** 64;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     var resolver = Resolver.initWasi(std.testing.allocator, &memory);
     defer resolver.deinit();
 
@@ -1234,9 +919,9 @@ test "resolver records proc_exit code" {
 
 test "resolver exposes wasi args and environ" {
     var memory_bytes = [_]u8{0} ** 128;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     const args = [_][]const u8{ "zug", "run" };
-    const environ = [_][]const u8{"ZUG_EDGE=1"};
+    const environ = [_][]const u8{"ZUG_RUNTIME=1"};
     var resolver = Resolver.initWasiConfig(std.testing.allocator, &memory, .{
         .args = &args,
         .environ = &environ,
@@ -1263,12 +948,12 @@ test "resolver exposes wasi args and environ" {
         resolver.call(.environ_sizes_get, &.{ .{ .i32 = 48 }, .{ .i32 = 52 } }),
     );
     try std.testing.expectEqual(@as(u32, 1), try memory.readU32(48));
-    try std.testing.expectEqual(@as(u32, 11), try memory.readU32(52));
+    try std.testing.expectEqual(@as(u32, 14), try memory.readU32(52));
 }
 
 test "resolver exposes wasi clock random and fdstat" {
     var memory_bytes = [_]u8{0} ** 128;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     var resolver = Resolver.initWasi(std.testing.allocator, &memory);
     defer resolver.deinit();
 
@@ -1290,60 +975,11 @@ test "resolver exposes wasi clock random and fdstat" {
     try std.testing.expectEqual(@as(u8, 2), (try memory.read(32, 1))[0]);
 }
 
-test "resolver exposes zug gpu control surface" {
-    var memory_bytes = [_]u8{0} ** 256;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
-    const devices = [_]gpu.Device{.{
-        .kind = .discrete,
-        .total_memory_bytes = 8 * 1024 * 1024 * 1024,
-        .available_memory_bytes = 6 * 1024 * 1024 * 1024,
-        .queue_count = 2,
-    }};
-    var resolver = Resolver.initWasi(std.testing.allocator, &memory);
-    defer resolver.deinit();
-    resolver.gpu = .{
-        .enabled = true,
-        .devices = &devices,
-    };
-
-    try std.testing.expect(Resolver.resolve("zug_gpu", "device_count") != null);
-    try std.testing.expect(Resolver.resolve("zug_gpu", "device_queue_count") != null);
-    try std.testing.expect(Resolver.resolve("zug_gpu", "open_device") != null);
-    try std.testing.expect(Resolver.resolve("zug_gpu", "create_buffer") != null);
-    try std.testing.expect(Resolver.resolve("zug_gpu", "dispatch_compute_stub") != null);
-    try std.testing.expectEqual(@as(u32, 1), resolver.call(.gpu_device_count, &.{}));
-    try std.testing.expectEqual(@as(u32, @intFromEnum(gpu.DeviceKind.discrete)), resolver.call(.gpu_device_kind, &.{.{ .i32 = 0 }}));
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_device_memory, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 8 } }));
-    try std.testing.expectEqual(@as(u64, 8 * 1024 * 1024 * 1024), readU64Little(try memory.read(0, 8)));
-    try std.testing.expectEqual(@as(u64, 6 * 1024 * 1024 * 1024), readU64Little(try memory.read(8, 8)));
-    try std.testing.expectEqual(@as(u32, 2), resolver.call(.gpu_device_queue_count, &.{.{ .i32 = 0 }}));
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_select_device, &.{.{ .i32 = 0 }}));
-    try std.testing.expectEqual(@as(u32, 0), resolver.call(.gpu_selected_device, &.{}));
-
-    try memory.write(32, &.{ 1, 2, 3, 4 });
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_open_device, &.{ .{ .i32 = 0 }, .{ .i32 = 64 } }));
-    const device_handle = try memory.readU32(64);
-    try std.testing.expect(device_handle != 0);
-
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_default_queue, &.{ .{ .i32 = device_handle }, .{ .i32 = 68 } }));
-    const queue_handle = try memory.readU32(68);
-    try std.testing.expect(queue_handle != 0);
-
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_create_buffer, &.{ .{ .i32 = device_handle }, .{ .i32 = 4 }, .{ .i32 = 72 } }));
-    const buffer_handle = try memory.readU32(72);
-    try std.testing.expect(buffer_handle != 0);
-
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_write_buffer, &.{ .{ .i32 = buffer_handle }, .{ .i32 = 0 }, .{ .i32 = 32 }, .{ .i32 = 4 } }));
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_read_buffer, &.{ .{ .i32 = buffer_handle }, .{ .i32 = 0 }, .{ .i32 = 48 }, .{ .i32 = 4 } }));
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, try memory.read(48, 4));
-    try std.testing.expectEqual(wasiErrnoSuccess, resolver.call(.gpu_dispatch_compute_stub, &.{ .{ .i32 = queue_handle }, .{ .i32 = buffer_handle }, .{ .i32 = 1 }, .{ .i32 = 1 }, .{ .i32 = 1 } }));
-}
-
 test "resolver exposes wasi stdin reads" {
     var memory_bytes = [_]u8{0} ** 128;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     var resolver = Resolver.initWasiConfig(std.testing.allocator, &memory, .{
-        .stdin = "robot",
+        .stdin = "hello",
     });
     defer resolver.deinit();
 
@@ -1357,13 +993,13 @@ test "resolver exposes wasi stdin reads" {
         resolver.call(.fd_read, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 2 }, .{ .i32 = 24 } }),
     );
     try std.testing.expectEqual(@as(u32, 5), try memory.readU32(24));
-    try std.testing.expectEqualStrings("rob", try memory.read(32, 3));
-    try std.testing.expectEqualStrings("ot", try memory.read(48, 2));
+    try std.testing.expectEqualStrings("hel", try memory.read(32, 3));
+    try std.testing.expectEqualStrings("lo", try memory.read(48, 2));
 }
 
 test "resolver exposes wasi preopen discovery and readonly file reads" {
     var memory_bytes = [_]u8{0} ** 512;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     const preopens = [_]Preopen{.{ .name = "." }};
     const files = [_]ReadonlyFile{.{ .preopen_name = ".", .path = "policy/input.txt", .data = "action-data" }};
     var resolver = Resolver.initWasiConfig(std.testing.allocator, &memory, .{
@@ -1450,7 +1086,7 @@ test "resolver exposes wasi preopen discovery and readonly file reads" {
 
 test "resolver enforces preopen readonly policy" {
     var memory_bytes = [_]u8{0} ** 256;
-    var memory = wasi_nn_abi.LinearMemory.init(&memory_bytes);
+    var memory = memory_module.LinearMemory.init(&memory_bytes);
     const preopens = [_]Preopen{.{ .name = ".", .allow_readdir = false, .allow_path_open = false }};
     const files = [_]ReadonlyFile{.{ .preopen_name = ".", .path = "input.txt", .data = "data" }};
     var resolver = Resolver.initWasiConfig(std.testing.allocator, &memory, .{

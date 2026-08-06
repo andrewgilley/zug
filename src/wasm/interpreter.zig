@@ -2624,7 +2624,7 @@ test "interpreter routes wasi system imports" {
     var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
     defer wasm_instance.deinit();
 
-    const args = [_][]const u8{ "zug", "edge" };
+    const args = [_][]const u8{ "zug", "host" };
     const environ = [_][]const u8{"ZUG=1"};
     var resolver = imports.Resolver.initWasiConfig(allocator, &wasm_instance.memory, .{
         .args = &args,
@@ -2643,130 +2643,6 @@ test "interpreter routes wasi system imports" {
     try std.testing.expectEqual(@as(u32, 6), try wasm_instance.memory.readU32(16));
     try std.testing.expectEqual(@as(u8, 2), (try wasm_instance.memory.read(40, 1))[0]);
     try std.testing.expect(readU64Little(try wasm_instance.memory.read(64, 8)) != 0);
-}
-
-test "interpreter routes wasi-nn import calls through ABI resolver" {
-    const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
-
-    var parsed = try module.Module.parse(allocator, fixtures.wasi_nn_compute_smoke);
-    defer parsed.deinit(allocator);
-
-    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
-    defer wasm_instance.deinit();
-
-    var host = wasi_nn_abi.Host.init(allocator);
-    defer host.deinit();
-
-    var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
-    var resolver = imports.Resolver.init(&surface);
-    try wasm_instance.bindImports(&resolver);
-
-    var interpreter = Interpreter.init(&wasm_instance);
-    const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
-
-    try std.testing.expectEqual(
-        @intFromEnum(wasi_nn_abi.Status.invalid_context_handle),
-        try valueAsI32(result),
-    );
-}
-
-test "interpreter runs tiny mnist wasi-nn flow from guest memory" {
-    const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
-
-    const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        std.Options.debug_io,
-        "models/tiny_mnist.onnx",
-        allocator,
-        .limited(100 * 1024 * 1024),
-    );
-    defer allocator.free(model_bytes);
-
-    var parsed = try module.Module.parse(allocator, fixtures.wasi_nn_tiny_mnist_flow);
-    defer parsed.deinit(allocator);
-
-    var wasm_instance = try instance.Instance.init(allocator, &parsed, 2 * 1024 * 1024);
-    defer wasm_instance.deinit();
-
-    try wasm_instance.memory.write(1024, model_bytes);
-    try std.testing.expectEqual(@as(u64, 1), readU64Little(try wasm_instance.memory.read(200000, 8)));
-    try std.testing.expectEqual(@as(u64, 28), readU64Little(try wasm_instance.memory.read(200016, 8)));
-
-    var host = wasi_nn_abi.Host.init(allocator);
-    defer host.deinit();
-
-    var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
-    var resolver = imports.Resolver.init(&surface);
-    try wasm_instance.bindImports(&resolver);
-
-    var interpreter = Interpreter.init(&wasm_instance);
-    const result = (try interpreter.callExport("run", &.{
-        .{ .i32 = std.math.cast(u32, model_bytes.len) orelse return error.ModelTooLarge },
-    })) orelse return error.MissingReturnValue;
-
-    try std.testing.expectEqual(@intFromEnum(wasi_nn_abi.Status.ok), try valueAsI32(result));
-
-    const context_handle = try wasm_instance.memory.readU32(20);
-    const output = try host.getOutput(.{ .index = context_handle }, 0);
-
-    try std.testing.expectEqualStrings("probabilities", output.name);
-    try std.testing.expectEqualSlices(usize, &.{ 1, 10 }, output.value.shape);
-}
-
-test "interpreter runs constrained edge inference guest flow" {
-    const allocator = std.testing.allocator;
-    const wasi_nn_abi = @import("../wasi_nn_abi.zig");
-
-    const model_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        std.Options.debug_io,
-        "models/tiny_mnist.onnx",
-        allocator,
-        .limited(100 * 1024 * 1024),
-    );
-    defer allocator.free(model_bytes);
-
-    var parsed = try module.Module.parse(allocator, fixtures.constrained_edge_inference_flow);
-    defer parsed.deinit(allocator);
-
-    var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
-    defer wasm_instance.deinit();
-
-    try wasm_instance.memory.write(1024, model_bytes);
-
-    var host = wasi_nn_abi.Host.init(allocator);
-    defer host.deinit();
-
-    var surface = wasi_nn_abi.Surface.init(allocator, &host, &wasm_instance.memory);
-    var resolver = imports.Resolver.init(&surface);
-    defer resolver.deinit();
-    try wasm_instance.bindImports(&resolver);
-
-    var interpreter = Interpreter.init(&wasm_instance);
-    const result = (try interpreter.callExport("run", &.{
-        .{ .i32 = std.math.cast(u32, model_bytes.len) orelse return error.ModelTooLarge },
-    })) orelse return error.MissingReturnValue;
-
-    try std.testing.expectEqual(@intFromEnum(wasi_nn_abi.Status.ok), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.currentMemoryPages());
-    try std.testing.expectEqual(@as(u32, 10), try wasm_instance.memory.readU32(16));
-    try std.testing.expectEqualStrings("edge:start\nedge:done\n", resolver.stdout.items);
-
-    try std.testing.expectEqual(@intFromEnum(wasi_nn_abi.DType.float32), try wasm_instance.memory.readU32(28));
-    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.memory.readU32(36));
-    try std.testing.expectEqual(@as(u32, 40), try wasm_instance.memory.readU32(40));
-    try std.testing.expectEqual(@as(u32, 40), try wasm_instance.memory.readU32(44));
-    try std.testing.expectEqual(@as(u64, 1), readU64Little(try wasm_instance.memory.read(96, 8)));
-    try std.testing.expectEqual(@as(u64, 10), readU64Little(try wasm_instance.memory.read(104, 8)));
-
-    const context_handle = try wasm_instance.memory.readU32(24);
-    const output = try host.getOutput(.{ .index = context_handle }, 0);
-    const output_values = try output.value.float32Data();
-
-    try std.testing.expectEqualStrings("probabilities", output.name);
-    try std.testing.expectEqualSlices(usize, &.{ 1, 10 }, output.value.shape);
-    try std.testing.expectEqual(@as(u32, @bitCast(output_values[0])), try wasm_instance.memory.readU32(128));
-    try std.testing.expectEqual(@as(u32, @bitCast(output_values[9])), try wasm_instance.memory.readU32(164));
 }
 
 fn readU64Little(bytes: []const u8) u64 {

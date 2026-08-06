@@ -6,6 +6,7 @@ pub const fixtures = @import("fixtures.zig");
 pub const imports = @import("imports.zig");
 pub const instance = @import("instance.zig");
 pub const interpreter = @import("interpreter.zig");
+pub const memory = @import("memory.zig");
 pub const module = @import("module.zig");
 pub const validator = @import("validator.zig");
 

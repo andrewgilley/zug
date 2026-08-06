@@ -1120,7 +1120,6 @@ test "validator accepts supported runtime fixtures" {
     const allocator = std.testing.allocator;
     const all = [_][]const u8{
         fixtures.return_i32_seven,
-        fixtures.wasi_nn_compute_smoke,
         fixtures.i32_integer_ops,
         fixtures.memory_integer_ops,
         fixtures.signed_i32_const,
