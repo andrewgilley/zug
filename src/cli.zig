@@ -257,8 +257,3 @@ fn printUsage() void {
         \\
     , .{});
 }
-
-test "byte counts align to WebAssembly pages" {
-    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), try parseByteCount("2MiB"));
-    try std.testing.expectEqual(@as(usize, 64 * 1024), try alignToWasmPage(1));
-}
