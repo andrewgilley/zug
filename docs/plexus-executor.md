@@ -12,8 +12,9 @@ python3 tests/plexus_bridge.py
 zig-out/bin/zug-plexus describe
 ```
 
-This explicit target is independent of the existing `zug` CLI and its WIT
-code-generation dependencies. The executable is `zig-out/bin/zug-plexus`.
+The executable is `zig-out/bin/zug-plexus`. A plain `zig build` installs it
+alongside the `zug` CLI, and `zig build test` runs the runtime, CLI and bridge
+tests together.
 
 ## Process contract
 

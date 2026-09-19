@@ -5,13 +5,12 @@ const wasm_imports = @import("wasm/imports.zig");
 const wasm_interpreter = @import("wasm/interpreter.zig");
 const wasm_manifest = @import("wasm/manifest.zig");
 const wasm_runtime = @import("wasm/runtime.zig");
-const wit_generator = @import("wit_generator.zig");
 
 const max_wasm_bytes = 100 * 1024 * 1024;
 const default_memory_bytes = 16 * 1024 * 1024;
 const wasm_page_size = 64 * 1024;
 
-const Command = enum { run, check, wit, help };
+const Command = enum { run, check, help };
 
 const Options = struct {
     command: Command,
@@ -19,7 +18,6 @@ const Options = struct {
     manifest_path: ?[]const u8 = null,
     export_name: ?[]const u8 = null,
     stdin: ?[]const u8 = null,
-    output_path: ?[]const u8 = null,
     memory_bytes: ?usize = null,
     args: std.ArrayList(u32) = .empty,
 
@@ -28,7 +26,6 @@ const Options = struct {
         freeOptional(allocator, self.manifest_path);
         freeOptional(allocator, self.export_name);
         freeOptional(allocator, self.stdin);
-        freeOptional(allocator, self.output_path);
         self.args.deinit(allocator);
     }
 };
@@ -47,10 +44,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     switch (options.command) {
         .run => try runModule(allocator, options),
         .check => if (!try checkModule(allocator, options)) std.process.exit(1),
-        .wit => try wit_generator.run(allocator, .{
-            .descriptor = options.path.?,
-            .out_path = options.output_path,
-        }),
         .help => printUsage(),
     }
 }
@@ -69,8 +62,6 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !Opti
         .run
     else if (std.mem.eql(u8, command_text, "check"))
         .check
-    else if (std.mem.eql(u8, command_text, "wit"))
-        .wit
     else
         return error.UnknownCommand;
 
@@ -91,8 +82,6 @@ fn parseArgs(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !Opti
             try options.args.append(allocator, @bitCast(value));
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             try replaceString(allocator, &options.stdin, args.next() orelse return error.MissingStdinValue);
-        } else if (std.mem.eql(u8, arg, "--out") and command == .wit) {
-            try replaceString(allocator, &options.output_path, args.next() orelse return error.MissingOutputPath);
         } else {
             return error.UnknownArgument;
         }
@@ -253,7 +242,6 @@ fn printUsage() void {
         \\usage:
         \\  zug run <module.wasm> [--manifest file] [--export name] [--memory bytes] [--arg i32] [--stdin text]
         \\  zug check <module.wasm|component.wasm> [--export name] [--memory bytes]
-        \\  zug wit component-smoke [--out file.wit]
         \\
     , .{});
 }

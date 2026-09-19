@@ -54,6 +54,9 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
-
+        self.functions.deinit(self.allocator);
+        self.memories.deinit(self.allocator);
+        self.tables.deinit(self.allocator);
+        self.globals.deinit(self.allocator);
     }
 };
