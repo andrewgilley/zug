@@ -34,6 +34,9 @@ const MemoryRange = struct {
 
 pub const Interpreter = struct {
     instance: *instance.Instance,
+    /// Optional instruction budget shared by start and exported calls.
+    fuel_remaining: ?u64 = null,
+    fuel_consumed: u64 = 0,
 
     pub fn init(wasm_instance: *instance.Instance) Interpreter {
         return .{
@@ -135,6 +138,11 @@ pub const Interpreter = struct {
         depth: usize,
     ) anyerror!Flow {
         while (reader.offset < limit) {
+            if (self.fuel_remaining) |remaining| {
+                if (remaining == 0) return error.FuelExhausted;
+                self.fuel_remaining = remaining - 1;
+                self.fuel_consumed += 1;
+            }
             const opcode = try reader.readByte();
 
             switch (opcode) {

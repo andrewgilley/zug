@@ -33,19 +33,18 @@ pub const Instance = struct {
     dropped_element_segments: []bool = &.{},
     dropped_data_segments: []bool = &.{},
     start_executed: bool = false,
+    /// Optional host budget; memory.grow returns -1 when it would exceed this.
+    max_memory_bytes: ?usize = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
         parsed_module: *const module.Module,
         initial_memory_bytes: usize,
     ) !Instance {
-        if (initial_memory_bytes == 0) return error.InvalidMemorySize;
-
         const memory_bytes = try allocator.alloc(
             u8,
             @max(initial_memory_bytes, try minimumMemoryBytes(parsed_module)),
         );
-        errdefer allocator.free(memory_bytes);
         @memset(memory_bytes, 0);
 
         var result = Instance{
@@ -372,6 +371,9 @@ pub const Instance = struct {
         if (delta_pages == 0) return old_pages;
 
         const new_len = std.math.mul(usize, new_pages, wasm_page_size) catch return null;
+        if (self.max_memory_bytes) |limit| {
+            if (new_len > limit) return null;
+        }
         const old_len = self.memory_bytes.len;
         const grown = self.allocator.realloc(self.memory_bytes, new_len) catch return null;
 
