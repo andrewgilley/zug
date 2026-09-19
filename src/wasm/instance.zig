@@ -21,13 +21,32 @@ const IndexRange = struct {
     len: usize,
 };
 
+/// Where a function import's calls go: a WASI host function, or a function
+/// exported by another instance (core-module linking).
+pub const ImportBinding = union(enum) {
+    host: imports.Function,
+    linked: LinkedFunction,
+};
+
+pub const LinkedFunction = struct {
+    instance: *Instance,
+    function_index: u32,
+};
+
+/// An earlier instance whose function exports later instances may import by
+/// using its name as the import module.
+pub const NamedInstance = struct {
+    name: []const u8,
+    instance: *Instance,
+};
+
 pub const Instance = struct {
     allocator: std.mem.Allocator,
     module: *const module.Module,
     memory_bytes: []u8,
     memory: memory_module.LinearMemory,
     import_resolver: ?*imports.Resolver = null,
-    imported_functions: []imports.Function = &.{},
+    imported_functions: []ImportBinding = &.{},
     globals: []RuntimeGlobal = &.{},
     tables: []RuntimeTable = &.{},
     dropped_element_segments: []bool = &.{},
@@ -94,16 +113,16 @@ pub const Instance = struct {
         }
 
         const count = self.importedFunctionCount();
-        const resolved = try self.allocator.alloc(imports.Function, count);
+        const resolved = try self.allocator.alloc(ImportBinding, count);
         errdefer self.allocator.free(resolved);
 
         var index: usize = 0;
         for (self.module.imports.items) |import| {
             if (import.kind != .function) continue;
 
-            resolved[index] = imports.Resolver.resolve(import.module, import.name) orelse {
+            resolved[index] = .{ .host = imports.Resolver.resolve(import.module, import.name) orelse {
                 return error.UnresolvedFunctionImport;
-            };
+            } };
             index += 1;
         }
 
@@ -111,7 +130,45 @@ pub const Instance = struct {
         self.import_resolver = resolver;
     }
 
-    pub fn importedFunction(self: *const Instance, index: u32) !imports.Function {
+    /// Bind every function import to an export of an earlier instance whose name
+    /// matches the import module. Nothing is granted from the host, and only
+    /// function imports are supported.
+    pub fn bindLinkedImports(self: *Instance, providers: []const NamedInstance) !void {
+        if (self.imported_functions.len != 0) {
+            self.allocator.free(self.imported_functions);
+            self.imported_functions = &.{};
+        }
+
+        const resolved = try self.allocator.alloc(ImportBinding, self.importedFunctionCount());
+        errdefer self.allocator.free(resolved);
+
+        var index: usize = 0;
+        for (self.module.imports.items) |import| {
+            if (import.kind != .function) return error.UnsupportedLinkedImportKind;
+
+            const provider = for (providers) |candidate| {
+                if (std.mem.eql(u8, candidate.name, import.module)) break candidate.instance;
+            } else return error.UnresolvedFunctionImport;
+
+            const function_index = provider.exportedFunctionIndex(import.name) catch {
+                return error.UnresolvedFunctionImport;
+            };
+            const expected = try self.functionType(import.type_index orelse return error.MissingImportTypeIndex);
+            const actual = try provider.functionType(try provider.functionTypeIndex(function_index));
+            if (!std.mem.eql(module.ValueType, expected.params, actual.params) or
+                !std.mem.eql(module.ValueType, expected.results, actual.results))
+            {
+                return error.IncompatibleImportType;
+            }
+
+            resolved[index] = .{ .linked = .{ .instance = provider, .function_index = function_index } };
+            index += 1;
+        }
+
+        self.imported_functions = resolved;
+    }
+
+    pub fn importedFunction(self: *const Instance, index: u32) !ImportBinding {
         const actual = std.math.cast(usize, index) orelse return error.InvalidFunctionIndex;
         if (actual >= self.imported_functions.len) return error.InvalidFunctionIndex;
 

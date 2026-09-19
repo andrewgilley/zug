@@ -84,11 +84,10 @@ pub const Interpreter = struct {
         const actual = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
 
         if (actual < imported_count) {
-            const imported = try self.instance.importedFunction(function_index);
+            const binding = try self.instance.importedFunction(function_index);
             const function_type = try self.instance.importedFunctionType(function_index);
             try validateFunctionArgs(function_type, args);
-            const result = try self.callImportWithValues(imported, args);
-            return resultFromImport(function_type, result);
+            return self.callBinding(binding, function_type, args, depth);
         }
 
         const function = try self.instance.definedFunction(function_index);
@@ -1332,10 +1331,10 @@ pub const Interpreter = struct {
         const actual = std.math.cast(usize, function_index) orelse return error.InvalidFunctionIndex;
 
         if (actual < imported_count) {
-            const imported = try self.instance.importedFunction(function_index);
+            const binding = try self.instance.importedFunction(function_index);
             const function_type = try self.instance.importedFunctionType(function_index);
             const arity = function_type.params.len;
-            var args_buffer: [7]Value = undefined;
+            var args_buffer: [16]Value = undefined;
 
             if (arity > args_buffer.len) return error.UnsupportedImportArity;
 
@@ -1345,8 +1344,7 @@ pub const Interpreter = struct {
                 args_buffer[remaining] = try popValue(stack);
             }
 
-            const result = try self.callImportWithValues(imported, args_buffer[0..arity]);
-            if (try resultFromImport(function_type, result)) |value| {
+            if (try self.callBinding(binding, function_type, args_buffer[0..arity], depth)) |value| {
                 try stack.append(self.instance.allocator, value);
             }
             return;
@@ -1386,6 +1384,29 @@ pub const Interpreter = struct {
         if (!functionTypesEqual(expected_type, actual_type)) return error.IndirectCallTypeMismatch;
 
         try self.callFunctionFromStack(function_index, stack, depth);
+    }
+
+    fn callBinding(
+        self: *Interpreter,
+        binding: instance.ImportBinding,
+        function_type: module.FunctionType,
+        args: []const Value,
+        depth: usize,
+    ) anyerror!?Value {
+        switch (binding) {
+            .host => |function| return resultFromImport(function_type, try self.callImportWithValues(function, args)),
+            .linked => |linked| {
+                // The callee runs in its own instance and memory, drawing on the
+                // caller's remaining fuel so the whole composition shares one budget.
+                var callee = Interpreter.init(linked.instance);
+                callee.fuel_remaining = self.fuel_remaining;
+                defer {
+                    self.fuel_remaining = callee.fuel_remaining;
+                    self.fuel_consumed += callee.fuel_consumed;
+                }
+                return callee.executeFunction(linked.function_index, args, depth + 1);
+            },
+        }
     }
 
     fn callImportWithValues(

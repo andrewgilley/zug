@@ -2,7 +2,10 @@
 const std = @import("std");
 const runtime = @import("wasm/runtime.zig");
 const Interpreter = runtime.interpreter.Interpreter;
+const Instance = runtime.instance.Instance;
 const protocol = "plexus-executor/1";
+const linked_protocol = "plexus-executor/2";
+const max_linked_modules = 8;
 const page = 65536;
 const max_module_bytes = 4 * 1024 * 1024;
 const max_request_bytes = 8 * 1024 * 1024;
@@ -15,38 +18,63 @@ const MemoryInput = struct {
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
         const value = try std.json.innerParse(std.json.Value, allocator, source, options);
         if (value != .object or value.object.count() != 3) return error.UnexpectedToken;
-        const exported = value.object.get("export") orelse return error.MissingField;
-        const offset = value.object.get("offset") orelse return error.MissingField;
-        if (exported != .string) return error.UnexpectedToken;
-        const start = switch (offset) {
-            .integer => |number| std.math.cast(usize, number) orelse return error.UnexpectedToken,
-            .number_string => |number| std.fmt.parseInt(usize, number, 10) catch return error.UnexpectedToken,
-            else => return error.UnexpectedToken,
-        };
-        const utf8 = value.object.get("utf8");
-        const bytes = value.object.get("bytes");
-        if ((utf8 == null) == (bytes == null)) return error.UnexpectedToken;
-        const payload = if (utf8) |text| blk: {
-            if (text != .string) return error.UnexpectedToken;
-            break :blk text.string;
-        } else blk: {
-            const raw = bytes.?;
-            if (raw != .array) return error.UnexpectedToken;
-            const result = try allocator.alloc(u8, raw.array.items.len);
-            for (raw.array.items, result) |byte, *out| {
-                if (byte != .integer) return error.UnexpectedToken;
-                out.* = std.math.cast(u8, byte.integer) orelse return error.UnexpectedToken;
-            }
-            break :blk result;
-        };
-        return .{ .@"export" = exported.string, .offset = start, .payload = payload };
+        return memoryFields(allocator, value.object);
     }
 };
+
+/// A plexus-executor/2 memory input names the module whose memory it fills.
+const LinkedMemoryInput = struct {
+    module: []const u8,
+    input: MemoryInput,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
+        const value = try std.json.innerParse(std.json.Value, allocator, source, options);
+        if (value != .object or value.object.count() != 4) return error.UnexpectedToken;
+        const name = value.object.get("module") orelse return error.MissingField;
+        if (name != .string) return error.UnexpectedToken;
+        return .{ .module = name.string, .input = try memoryFields(allocator, value.object) };
+    }
+};
+
+fn memoryFields(allocator: std.mem.Allocator, object: std.json.ObjectMap) std.json.ParseError(std.json.Scanner)!MemoryInput {
+    const exported = object.get("export") orelse return error.MissingField;
+    const offset = object.get("offset") orelse return error.MissingField;
+    if (exported != .string) return error.UnexpectedToken;
+    const start = switch (offset) {
+        .integer => |number| std.math.cast(usize, number) orelse return error.UnexpectedToken,
+        .number_string => |number| std.fmt.parseInt(usize, number, 10) catch return error.UnexpectedToken,
+        else => return error.UnexpectedToken,
+    };
+    const utf8 = object.get("utf8");
+    const bytes = object.get("bytes");
+    if ((utf8 == null) == (bytes == null)) return error.UnexpectedToken;
+    const payload = if (utf8) |text| blk: {
+        if (text != .string) return error.UnexpectedToken;
+        break :blk text.string;
+    } else blk: {
+        const raw = bytes.?;
+        if (raw != .array) return error.UnexpectedToken;
+        const result = try allocator.alloc(u8, raw.array.items.len);
+        for (raw.array.items, result) |byte, *out| {
+            if (byte != .integer) return error.UnexpectedToken;
+            out.* = std.math.cast(u8, byte.integer) orelse return error.UnexpectedToken;
+        }
+        break :blk result;
+    };
+    return .{ .@"export" = exported.string, .offset = start, .payload = payload };
+}
 const Case = struct { name: []const u8, arguments: []const i32, memory: ?MemoryInput = null };
 const Limits = struct { fuel_per_case: u64, memory_bytes: usize };
 const Request = struct { @"export": []const u8, result_count: usize, cases: []const Case, limits: Limits };
 const Envelope = struct { schema_version: u32, protocol: []const u8, module_path: []const u8, module_digest: []const u8, request: Request };
-const Stage = enum { initialization, input, invocation };
+const ModuleRef = struct { name: []const u8, module_path: []const u8, module_digest: []const u8 };
+const Entry = struct { module: []const u8, @"export": []const u8 };
+const LinkedCase = struct { name: []const u8, arguments: []const i32, memory: ?LinkedMemoryInput = null };
+const LinkedRequest = struct { entry: Entry, result_count: usize, cases: []const LinkedCase, limits: Limits };
+const LinkedEnvelope = struct { schema_version: u32, protocol: []const u8, modules: []const ModuleRef, request: LinkedRequest };
+const LoadedModule = struct { name: []const u8, bytes: []const u8 };
+const ModuleEcho = struct { name: []const u8, module_digest: []const u8 };
+const Stage = enum { link, initialization, input, invocation };
 const Outcome = union(enum) {
     returned: []const i32,
     fuel_exhausted: Stage,
@@ -96,7 +124,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
             .protocol = protocol,
             .backend = "zug",
             .version = "0.0.1",
-            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true },
+            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true },
         });
         return;
     }
@@ -105,6 +133,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
     if (args.next() != null) return error.UnexpectedArgument;
     if (!std.fs.path.isAbsolute(path)) return error.AbsolutePathRequired;
     const json = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_request_bytes));
+    if (try requestProtocolIs(allocator, json, linked_protocol)) return executeLinkedRequest(allocator, json);
     const parsed = try std.json.parseFromSlice(Envelope, allocator, json, .{});
     const envelope = parsed.value;
     if (envelope.schema_version != 1 or !std.mem.eql(u8, envelope.protocol, protocol)) return error.UnsupportedProtocol;
@@ -115,6 +144,32 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
     if (!std.mem.eql(u8, &digest, envelope.module_digest)) return error.ModuleDigestMismatch;
     const execution = try execute(allocator, bytes, envelope.request);
     try emit(allocator, .{ .schema_version = 1, .protocol = protocol, .module_digest = envelope.module_digest, .execution = execution });
+}
+
+fn requestProtocolIs(allocator: std.mem.Allocator, json: []const u8, expected: []const u8) !bool {
+    const value = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    if (value.value != .object) return error.UnexpectedToken;
+    const field = value.value.object.get("protocol") orelse return error.MissingField;
+    return field == .string and std.mem.eql(u8, field.string, expected);
+}
+
+fn executeLinkedRequest(allocator: std.mem.Allocator, json: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(LinkedEnvelope, allocator, json, .{});
+    const envelope = parsed.value;
+    if (envelope.schema_version != 1 or !std.mem.eql(u8, envelope.protocol, linked_protocol)) return error.UnsupportedProtocol;
+    try validateLinkedRequest(envelope.modules, envelope.request);
+    const modules = try allocator.alloc(LoadedModule, envelope.modules.len);
+    const echoes = try allocator.alloc(ModuleEcho, envelope.modules.len);
+    for (envelope.modules, modules, echoes) |reference, *loaded, *echo| {
+        if (!std.fs.path.isAbsolute(reference.module_path)) return error.AbsolutePathRequired;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, reference.module_path, allocator, .limited(max_module_bytes));
+        const digest = moduleDigest(bytes);
+        if (!std.mem.eql(u8, &digest, reference.module_digest)) return error.ModuleDigestMismatch;
+        loaded.* = .{ .name = reference.name, .bytes = bytes };
+        echo.* = .{ .name = reference.name, .module_digest = reference.module_digest };
+    }
+    const execution = try executeLinked(allocator, modules, envelope.request);
+    try emit(allocator, .{ .schema_version = 1, .protocol = linked_protocol, .modules = echoes, .execution = execution });
 }
 
 fn emit(allocator: std.mem.Allocator, value: anytype) !void {
@@ -146,6 +201,150 @@ fn validateRequest(request: Request) !void {
             if (end > request.limits.memory_bytes) return error.InvalidMemoryInput;
         }
     }
+}
+
+fn validateLinkedRequest(modules: []const ModuleRef, request: LinkedRequest) !void {
+    if (modules.len == 0 or modules.len > max_linked_modules) return error.InvalidModuleCount;
+    for (modules, 0..) |module, index| {
+        if (module.name.len == 0 or module.name.len > 64) return error.InvalidModuleName;
+        for (module.name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return error.InvalidModuleName;
+        }
+        for (modules[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, module.name)) return error.DuplicateModuleName;
+        }
+    }
+    if (moduleIndex(modules, request.entry.module) == null) return error.UnknownEntryModule;
+    if (request.entry.@"export".len == 0 or request.result_count > 1) return error.InvalidExportOrResultCount;
+    if (request.cases.len == 0 or request.cases.len > 64) return error.InvalidCaseCount;
+    if (request.limits.fuel_per_case == 0 or request.limits.fuel_per_case > 10_000_000) return error.InvalidFuelLimit;
+    if (request.limits.memory_bytes < page or request.limits.memory_bytes > 64 * 1024 * 1024) return error.InvalidMemoryLimit;
+    for (request.cases, 0..) |case, index| {
+        if (case.name.len == 0 or case.arguments.len > 16) return error.InvalidCase;
+        for (request.cases[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, case.name)) return error.DuplicateCaseName;
+        }
+        if (case.memory) |memory| {
+            if (moduleIndex(modules, memory.module) == null) return error.UnknownMemoryModule;
+            if (memory.input.@"export".len == 0 or memory.input.payload.len > 1024 * 1024) return error.InvalidMemoryInput;
+            const end = std.math.add(usize, memory.input.offset, memory.input.payload.len) catch return error.InvalidMemoryInput;
+            if (end > request.limits.memory_bytes) return error.InvalidMemoryInput;
+        }
+    }
+}
+
+fn moduleIndex(modules: anytype, name: []const u8) ?usize {
+    for (modules, 0..) |module, index| {
+        if (std.mem.eql(u8, module.name, name)) return index;
+    }
+    return null;
+}
+
+/// Instantiate the modules in order for every case, binding each module's
+/// function imports to exports of earlier modules. Unsupported shapes are
+/// reported as runtime limitations before any guest instruction runs.
+fn executeLinked(allocator: std.mem.Allocator, modules: []const LoadedModule, request: LinkedRequest) !Execution {
+    const rt = runtime.Runtime.init(allocator);
+    const parsed = try allocator.alloc(runtime.module.Module, modules.len);
+    const initial = try allocator.alloc(usize, modules.len);
+    for (modules, parsed, initial) |module, *out, *bytes| {
+        out.* = rt.parseModule(module.bytes) catch |err| return .{ .unsupported = @errorName(err) };
+        for (out.imports.items) |import| {
+            if (import.kind != .function) return .{ .unsupported = "imported memories, tables and globals are not supported by this worker" };
+        }
+        if (out.tables.items.len != 0) return .{ .unsupported = "tables are not supported by this worker" };
+        if (out.memories.items.len > 1) return .{ .unsupported = "multiple memories are not supported" };
+        bytes.* = if (out.memories.items.len == 0) 0 else @as(usize, out.memories.items[0].limits.min) * page;
+        if (bytes.* > request.limits.memory_bytes) return .{ .unsupported = "minimum memory exceeds requested budget" };
+        rt.validateModule(out) catch |err| return .{ .unsupported = @errorName(err) };
+    }
+    const entry = moduleIndex(modules, request.entry.module).?;
+    var selected: ?runtime.module.FunctionType = null;
+    for (parsed[entry].exports.items) |exported| {
+        if (exported.kind == .function and std.mem.eql(u8, exported.name, request.entry.@"export")) {
+            const defined = std.math.sub(u32, exported.index, @intCast(importedFunctions(&parsed[entry]))) catch {
+                return .{ .unsupported = "re-exported imports are not supported as the entry" };
+            };
+            selected = try parsed[entry].functionType(parsed[entry].functions.items[defined].type_index);
+        }
+    }
+    const signature = selected orelse return .{ .unsupported = "unknown function export" };
+    if (signature.results.len != request.result_count) return error.ResultArityMismatch;
+    for (signature.params) |param| if (param != .i32) return .{ .unsupported = "only i32 parameters are supported" };
+    for (signature.results) |result| if (result != .i32) return .{ .unsupported = "only i32 results are supported" };
+    for (request.cases) |case| if (case.arguments.len != signature.params.len) return error.ArgumentArityMismatch;
+
+    const observations = try allocator.alloc(Observation, request.cases.len);
+    for (request.cases, observations) |case, *observation| {
+        observation.* = try observeLinked(allocator, modules, parsed, initial, entry, request, case);
+    }
+    return .{ .observed = observations };
+}
+
+fn importedFunctions(module: *const runtime.module.Module) usize {
+    var count: usize = 0;
+    for (module.imports.items) |import| {
+        if (import.kind == .function) count += 1;
+    }
+    return count;
+}
+
+fn observeLinked(
+    allocator: std.mem.Allocator,
+    modules: []const LoadedModule,
+    parsed: []const runtime.module.Module,
+    initial: []const usize,
+    entry: usize,
+    request: LinkedRequest,
+    case: LinkedCase,
+) !Observation {
+    const values = try allocator.alloc(i32, request.result_count);
+    var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer case_arena.deinit();
+    const scratch = case_arena.allocator();
+    const rt = runtime.Runtime.init(scratch);
+
+    // Instances need stable addresses: later instances call into earlier ones.
+    const instances = try scratch.alloc(Instance, modules.len);
+    const named = try scratch.alloc(runtime.instance.NamedInstance, modules.len);
+    var fuel_remaining = request.limits.fuel_per_case;
+    var fuel_consumed: u64 = 0;
+    for (modules, parsed, initial, instances, named, 0..) |module, *module_parsed, initial_bytes, *instance, *name, index| {
+        instance.* = rt.instantiate(module_parsed, initial_bytes) catch |err| return .{ .name = case.name, .outcome = failure(err, .initialization), .fuel_consumed = fuel_consumed };
+        instance.max_memory_bytes = request.limits.memory_bytes;
+        instance.bindLinkedImports(named[0..index]) catch |err| return .{ .name = case.name, .outcome = failure(err, .link), .fuel_consumed = fuel_consumed };
+        name.* = .{ .name = module.name, .instance = instance };
+
+        // Start functions run in order and share the case's fuel budget.
+        var starter = Interpreter.init(instance);
+        starter.fuel_remaining = fuel_remaining;
+        const started = starter.runStart();
+        fuel_remaining = starter.fuel_remaining.?;
+        fuel_consumed += starter.fuel_consumed;
+        started catch |err| return .{ .name = case.name, .outcome = failure(err, .initialization), .fuel_consumed = fuel_consumed };
+    }
+
+    if (case.memory) |memory| {
+        const target = moduleIndex(modules, memory.module).?;
+        var found = false;
+        for (parsed[target].exports.items) |exported| {
+            if (exported.kind == .memory and exported.index == 0 and std.mem.eql(u8, exported.name, memory.input.@"export")) found = true;
+        }
+        if (!found) return .{ .name = case.name, .outcome = failure(error.UnknownMemoryExport, .input), .fuel_consumed = fuel_consumed };
+        instances[target].memory.write(@intCast(memory.input.offset), memory.input.payload) catch |err| return .{ .name = case.name, .outcome = failure(err, .input), .fuel_consumed = fuel_consumed };
+    }
+
+    var interpreter = Interpreter.init(&instances[entry]);
+    interpreter.fuel_remaining = fuel_remaining;
+    var arguments: [16]runtime.interpreter.Value = undefined;
+    for (case.arguments, 0..) |arg, index| arguments[index] = .{ .i32 = @bitCast(arg) };
+    const result = interpreter.callExport(request.entry.@"export", arguments[0..case.arguments.len]) catch |err| return .{ .name = case.name, .outcome = failure(err, .invocation), .fuel_consumed = fuel_consumed + interpreter.fuel_consumed };
+    fuel_consumed += interpreter.fuel_consumed;
+    if (result) |value| {
+        if (values.len != 1 or value != .i32) return error.UnexpectedRuntimeResult;
+        values[0] = @bitCast(value.i32);
+    } else if (values.len != 0) return error.UnexpectedRuntimeResult;
+    return .{ .name = case.name, .outcome = .{ .returned = values }, .fuel_consumed = fuel_consumed };
 }
 
 // Parsing and validation deliberately precede every guest instruction. Unsupported
@@ -273,4 +472,67 @@ test "request limits and no-host-import profile are enforced" {
 
 fn testRequest() Request {
     return .{ .@"export" = "run", .result_count = 1, .cases = &.{ .{ .name = "first", .arguments = &.{} }, .{ .name = "fresh", .arguments = &.{} } }, .limits = .{ .fuel_per_case = 10000, .memory_bytes = page } };
+}
+
+fn linkedTestRequest(cases: []const LinkedCase, fuel: u64) LinkedRequest {
+    return .{ .entry = .{ .module = "consumer", .@"export" = "run" }, .result_count = 1, .cases = cases, .limits = .{ .fuel_per_case = fuel, .memory_bytes = page } };
+}
+
+const linked_cases = [_]LinkedCase{
+    .{ .name = "all-high", .arguments = &.{0}, .memory = .{ .module = "consumer", .input = .{ .@"export" = "memory", .offset = 0, .payload = &.{ 255, 255, 255, 255 } } } },
+    .{ .name = "unaligned", .arguments = &.{1}, .memory = .{ .module = "consumer", .input = .{ .@"export" = "memory", .offset = 1, .payload = &.{ 1, 2, 4, 8 } } } },
+};
+
+test "linked consumer calls the separately built provider through its import" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const modules = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.linked_provider },
+        .{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer },
+    };
+    const result = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&linked_cases, 10_000));
+    try std.testing.expectEqual(@as(i32, 1020), result.observed[0].outcome.returned[0]);
+    try std.testing.expectEqual(@as(i32, 15), result.observed[1].outcome.returned[0]);
+    // The provider's instructions draw on the same per-case budget.
+    try std.testing.expect(result.observed[0].fuel_consumed.? > 15);
+}
+
+test "same interface with different behavior links and returns its own results" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const modules = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.linked_provider_xor },
+        .{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer },
+    };
+    const result = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&linked_cases, 10_000));
+    try std.testing.expectEqual(@as(i32, 0), result.observed[0].outcome.returned[0]);
+    try std.testing.expectEqual(@as(i32, 15), result.observed[1].outcome.returned[0]);
+}
+
+test "mistyped and missing imports fail at the link stage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const mistyped = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.linked_provider },
+        .{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer_pointer },
+    };
+    const mismatch = try executeLinked(arena.allocator(), &mistyped, linkedTestRequest(&linked_cases, 10_000));
+    try std.testing.expectEqual(Stage.link, mismatch.observed[0].outcome.failed.stage);
+    try std.testing.expectEqualStrings("IncompatibleImportType", mismatch.observed[0].outcome.failed.diagnostic);
+
+    const alone = [_]LoadedModule{.{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer }};
+    const missing = try executeLinked(arena.allocator(), &alone, linkedTestRequest(&linked_cases, 10_000));
+    try std.testing.expectEqualStrings("UnresolvedFunctionImport", missing.observed[0].outcome.failed.diagnostic);
+}
+
+test "fuel is shared across linked modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const modules = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.linked_provider },
+        .{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer },
+    };
+    const baseline = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&linked_cases, 10_000));
+    const short = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&linked_cases, baseline.observed[0].fuel_consumed.? - 1));
+    try std.testing.expectEqual(Stage.invocation, short.observed[0].outcome.fuel_exhausted);
 }

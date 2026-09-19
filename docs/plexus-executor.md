@@ -1,6 +1,7 @@
 # Local Plexus executor bridge
 
-`zug-plexus` implements protocol `plexus-executor/1`. Plexus owns plans, archived
+`zug-plexus` implements protocols `plexus-executor/1` and, for linked modules,
+`plexus-executor/2`. Plexus owns plans, archived
 artifacts, expected answers and interpretation. The worker only executes a pinned
 core Wasm module and reports observations. It never accepts expected answers.
 
@@ -33,8 +34,11 @@ execution with exit status zero. There is no long-running server or networking.
 Description response:
 
 ```json
-{"schema_version":1,"protocol":"plexus-executor/1","backend":"zug","version":"0.0.1","capabilities":{"fuel":true,"memory_limit":true,"max_results":1,"memory_input":true,"memory_bytes":true}}
+{"schema_version":1,"protocol":"plexus-executor/1","backend":"zug","version":"0.0.1","capabilities":{"fuel":true,"memory_limit":true,"max_results":1,"memory_input":true,"memory_bytes":true,"linked_modules":true}}
 ```
+
+`linked_modules` is an additive capability: the worker also accepts
+`plexus-executor/2` execute requests, described below.
 
 Execution request:
 
@@ -122,3 +126,41 @@ Runtime scratch state is discarded between cases. This bridge is a local
 experimental worker, not a hardened untrusted-code sandbox. The caller should
 apply a process wall-clock deadline and bound captured output. Fuel alone does
 not bound parsing or validation of malformed modules.
+
+## Linked modules (`plexus-executor/2`)
+
+An execute request whose `protocol` is `plexus-executor/2` names up to eight
+modules instead of one:
+
+```json
+{
+  "schema_version": 1,
+  "protocol": "plexus-executor/2",
+  "modules": [
+    {"name": "provider", "module_path": "/abs/provider.wasm", "module_digest": "sha256:..."},
+    {"name": "consumer", "module_path": "/abs/consumer.wasm", "module_digest": "sha256:..."}
+  ],
+  "request": {
+    "entry": {"module": "consumer", "export": "run"},
+    "result_count": 1,
+    "cases": [{"name": "all-high", "arguments": [0],
+               "memory": {"module": "consumer", "export": "memory", "offset": 0, "bytes": [255, 255, 255, 255]}}],
+    "limits": {"fuel_per_case": 10000, "memory_bytes": 65536}
+  }
+}
+```
+
+For every case the worker instantiates the modules in order. It binds each
+module's function imports to exports of an **earlier** module whose name
+equals the import module, and checks that the parameter and result types are
+equal. Nothing is granted from the host. A linked call runs in the callee's
+own instance and memory, and draws on the same fuel budget. That budget covers
+every module's start function and the entry call. `memory_bytes` bounds each
+memory.
+
+The response echoes `modules` (names and digests, in order) in place of
+`module_digest`. Outcomes gain the stage `link`: `UnresolvedFunctionImport`,
+`IncompatibleImportType` or `UnsupportedLinkedImportKind` means the modules
+could not be linked as declared. Imported memories, tables and globals are
+reported as `unsupported`. The schemas and fixtures live in the workspace's
+`contracts/plexus-executor-2`.
