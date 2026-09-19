@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const binary = @import("binary.zig");
 pub const component = @import("component.zig");
+pub const component_runtime = @import("component_runtime.zig");
 pub const fixtures = @import("fixtures.zig");
 pub const imports = @import("imports.zig");
 pub const instance = @import("instance.zig");

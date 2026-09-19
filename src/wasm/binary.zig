@@ -74,6 +74,7 @@ pub const Reader = struct {
 
         while (true) {
             const byte = try self.readByte();
+            if (shift == 28 and byte > 0x0f) return error.InvalidVarInt;
             result |= @as(u32, byte & 0x7f) << shift;
 
             if ((byte & 0x80) == 0) return result;
@@ -88,6 +89,7 @@ pub const Reader = struct {
 
         while (true) {
             const byte = try self.readByte();
+            if (shift == 63 and byte > 0x01) return error.InvalidVarInt;
             result |= @as(u64, byte & 0x7f) << shift;
 
             if ((byte & 0x80) == 0) return result;
@@ -102,6 +104,8 @@ pub const Reader = struct {
 
         while (true) {
             const byte = try self.readByte();
+            if (shift == 28 and (byte & 0x78) != 0 and (byte & 0x78) != 0x78)
+                return error.InvalidVarInt;
             result |= @as(u32, byte & 0x7f) << shift;
 
             if ((byte & 0x80) == 0) {
@@ -125,6 +129,7 @@ pub const Reader = struct {
 
         while (true) {
             const byte = try self.readByte();
+            if (shift == 63 and byte != 0 and byte != 0x7f) return error.InvalidVarInt;
             result |= @as(u64, byte & 0x7f) << shift;
 
             if ((byte & 0x80) == 0) {
@@ -210,4 +215,38 @@ test "reader decodes signed LEB integers" {
 
     var i64_reader = Reader.init("\x7e");
     try std.testing.expectEqual(@as(i64, -2), try i64_reader.readVarI64());
+}
+
+test "LEB integer readers reject overflowing unused terminal bits" {
+    var u32_overflow = Reader.init("\x80\x80\x80\x80\x10");
+    try std.testing.expectError(error.InvalidVarInt, u32_overflow.readVarU32());
+    var u64_overflow = Reader.init("\x80\x80\x80\x80\x80\x80\x80\x80\x80\x02");
+    try std.testing.expectError(error.InvalidVarInt, u64_overflow.readVarU64());
+    var i32_positive_overflow = Reader.init("\x80\x80\x80\x80\x08");
+    try std.testing.expectError(error.InvalidVarInt, i32_positive_overflow.readVarI32());
+    var i32_negative_overflow = Reader.init("\x80\x80\x80\x80\x70");
+    try std.testing.expectError(error.InvalidVarInt, i32_negative_overflow.readVarI32());
+    var i64_positive_overflow = Reader.init("\x80\x80\x80\x80\x80\x80\x80\x80\x80\x01");
+    try std.testing.expectError(error.InvalidVarInt, i64_positive_overflow.readVarI64());
+    var i64_negative_overflow = Reader.init("\x80\x80\x80\x80\x80\x80\x80\x80\x80\x7e");
+    try std.testing.expectError(error.InvalidVarInt, i64_negative_overflow.readVarI64());
+}
+
+test "LEB integer readers preserve boundary values and valid padded encodings" {
+    var u32_max = Reader.init("\xff\xff\xff\xff\x0f");
+    try std.testing.expectEqual(std.math.maxInt(u32), try u32_max.readVarU32());
+    var u64_max = Reader.init("\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01");
+    try std.testing.expectEqual(std.math.maxInt(u64), try u64_max.readVarU64());
+    var i32_min = Reader.init("\x80\x80\x80\x80\x78");
+    try std.testing.expectEqual(std.math.minInt(i32), try i32_min.readVarI32());
+    var i32_max = Reader.init("\xff\xff\xff\xff\x07");
+    try std.testing.expectEqual(std.math.maxInt(i32), try i32_max.readVarI32());
+    var i64_min = Reader.init("\x80\x80\x80\x80\x80\x80\x80\x80\x80\x7f");
+    try std.testing.expectEqual(std.math.minInt(i64), try i64_min.readVarI64());
+    var i64_max = Reader.init("\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00");
+    try std.testing.expectEqual(std.math.maxInt(i64), try i64_max.readVarI64());
+    var padded_negative = Reader.init("\xff\xff\xff\xff\x7f");
+    try std.testing.expectEqual(@as(i32, -1), try padded_negative.readVarI32());
+    var padded_zero = Reader.init("\x80\x80\x80\x80\x00");
+    try std.testing.expectEqual(@as(u32, 0), try padded_zero.readVarU32());
 }

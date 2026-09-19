@@ -6,6 +6,7 @@ test {
     _ = @import("wasm/binary.zig");
     _ = @import("wasm/compatibility.zig");
     _ = @import("wasm/component.zig");
+    _ = @import("wasm/component_runtime.zig");
     _ = @import("wasm/imports.zig");
     _ = @import("wasm/instance.zig");
     _ = @import("wasm/interpreter.zig");

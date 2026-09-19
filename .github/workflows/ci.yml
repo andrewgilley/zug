@@ -38,3 +38,6 @@ jobs:
 
       - name: Run bridge process tests
         run: python3 tests/plexus_bridge.py
+
+      - name: Run Component Model bridge tests
+        run: python3 tests/component_bridge.py

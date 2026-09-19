@@ -5,6 +5,8 @@ const Interpreter = runtime.interpreter.Interpreter;
 const Instance = runtime.instance.Instance;
 const protocol = "plexus-executor/1";
 const linked_protocol = "plexus-executor/2";
+const component_protocol = "plexus-executor/3";
+const component_runtime = @import("wasm/component_runtime.zig");
 const max_linked_modules = 8;
 const page = 65536;
 const max_module_bytes = 4 * 1024 * 1024;
@@ -73,6 +75,59 @@ const LinkedCase = struct { name: []const u8, arguments: []const i32, memory: ?L
 const LinkedRequest = struct { entry: Entry, result_count: usize, cases: []const LinkedCase, limits: Limits };
 const LinkedEnvelope = struct { schema_version: u32, protocol: []const u8, modules: []const ModuleRef, request: LinkedRequest };
 const LoadedModule = struct { name: []const u8, bytes: []const u8 };
+const ComponentArgument = struct {
+    type: []const u8,
+    value: [4]u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
+        const value = try std.json.innerParse(std.json.Value, allocator, source, options);
+        if (value != .object or value.object.count() != 2) return error.UnexpectedToken;
+        const type_name = value.object.get("type") orelse return error.MissingField;
+        const bytes = value.object.get("value") orelse return error.MissingField;
+        if (type_name != .string or bytes != .array or bytes.array.items.len != 4) return error.UnexpectedToken;
+        var result: [4]u8 = undefined;
+        for (bytes.array.items, &result) |byte, *item| {
+            if (byte != .integer) return error.UnexpectedToken;
+            item.* = std.math.cast(u8, byte.integer) orelse return error.UnexpectedToken;
+        }
+        return .{ .type = type_name.string, .value = result };
+    }
+};
+const ComponentCase = struct { name: []const u8, arguments: [1]ComponentArgument };
+const ComponentRequest = struct {
+    profile: []const u8,
+    @"export": []const u8,
+    cases: []const ComponentCase,
+    limits: Limits,
+    host_grants: []const std.json.Value,
+};
+const ComponentEnvelope = struct { schema_version: u32, protocol: []const u8, component_path: []const u8, component_digest: []const u8, request: ComponentRequest };
+const ComponentStage = enum { component_validation, initialization, invocation };
+const ComponentOutcome = union(enum) {
+    returned: u32,
+    fuel_exhausted: ComponentStage,
+    failed: struct { stage: ComponentStage, diagnostic: []const u8 },
+
+    pub fn jsonStringify(self: ComponentOutcome, out: *std.json.Stringify) !void {
+        switch (self) {
+            .returned => |value| try out.write(.{ .kind = "returned", .values = .{.{ .type = "u32", .value = value }} }),
+            .fuel_exhausted => |stage| try out.write(.{ .kind = "fuel_exhausted", .stage = stage }),
+            .failed => |v| try out.write(.{ .kind = "failed", .stage = v.stage, .diagnostic = v.diagnostic }),
+        }
+    }
+};
+const ComponentObservation = struct { name: []const u8, outcome: ComponentOutcome, fuel_consumed: ?u64, host_trace: [0]std.json.Value = .{} };
+const ComponentExecution = union(enum) {
+    observed: []const ComponentObservation,
+    unsupported: []const u8,
+
+    pub fn jsonStringify(self: ComponentExecution, out: *std.json.Stringify) !void {
+        switch (self) {
+            .observed => |cases| try out.write(.{ .kind = "observed", .cases = cases }),
+            .unsupported => |reason| try out.write(.{ .kind = "unsupported", .reason = reason }),
+        }
+    }
+};
 const ModuleEcho = struct { name: []const u8, module_digest: []const u8 };
 const Stage = enum { link, initialization, input, invocation };
 const Outcome = union(enum) {
@@ -124,7 +179,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
             .protocol = protocol,
             .backend = "zug",
             .version = "0.0.1",
-            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true },
+            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true, .component_fixed_list = true },
         });
         return;
     }
@@ -133,6 +188,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
     if (args.next() != null) return error.UnexpectedArgument;
     if (!std.fs.path.isAbsolute(path)) return error.AbsolutePathRequired;
     const json = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_request_bytes));
+    if (try requestProtocolIs(allocator, json, component_protocol)) return executeComponentRequest(allocator, json);
     if (try requestProtocolIs(allocator, json, linked_protocol)) return executeLinkedRequest(allocator, json);
     const parsed = try std.json.parseFromSlice(Envelope, allocator, json, .{});
     const envelope = parsed.value;
@@ -151,6 +207,92 @@ fn requestProtocolIs(allocator: std.mem.Allocator, json: []const u8, expected: [
     if (value.value != .object) return error.UnexpectedToken;
     const field = value.value.object.get("protocol") orelse return error.MissingField;
     return field == .string and std.mem.eql(u8, field.string, expected);
+}
+
+fn executeComponentRequest(allocator: std.mem.Allocator, json: []const u8) !void {
+    // Zig's typed JSON parser can coerce numeric strings and integral floats.
+    // The wire contract requires actual JSON integer tokens for these fields.
+    const raw = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    if (raw.value != .object) return error.InvalidComponentEnvelope;
+    const version = raw.value.object.get("schema_version") orelse return error.MissingSchemaVersion;
+    if (version != .integer or version.integer != 1) return error.UnsupportedProtocol;
+    const raw_request = raw.value.object.get("request") orelse return error.InvalidComponentRequest;
+    if (raw_request != .object) return error.InvalidComponentRequest;
+    const raw_limits = raw_request.object.get("limits") orelse return error.InvalidComponentLimits;
+    if (raw_limits != .object) return error.InvalidComponentLimits;
+    for ([_][]const u8{ "fuel_per_case", "memory_bytes" }) |field| {
+        const number = raw_limits.object.get(field) orelse return error.InvalidComponentLimits;
+        if (number != .integer) return error.InvalidComponentLimits;
+    }
+    const parsed = try std.json.parseFromSlice(ComponentEnvelope, allocator, json, .{});
+    const envelope = parsed.value;
+    if (envelope.schema_version != 1 or !std.mem.eql(u8, envelope.protocol, component_protocol)) return error.UnsupportedProtocol;
+    if (!std.fs.path.isAbsolute(envelope.component_path)) return error.AbsolutePathRequired;
+    try validateComponentRequest(envelope.request);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, envelope.component_path, allocator, .limited(1024 * 1024));
+    const digest = moduleDigest(bytes);
+    if (!std.mem.eql(u8, &digest, envelope.component_digest)) return error.ComponentDigestMismatch;
+    const execution = try executeComponent(allocator, bytes, envelope.request);
+    try emit(allocator, .{ .schema_version = 1, .protocol = component_protocol, .component_digest = &digest, .execution = execution });
+}
+
+fn validateComponentRequest(request: ComponentRequest) !void {
+    if (!std.mem.eql(u8, request.profile, "fixed-list-u8-u32/1")) return error.UnsupportedComponentProfile;
+    if (request.host_grants.len != 0) return error.UnsupportedHostGrants;
+    if (request.@"export".len == 0 or request.@"export".len > 1024) return error.InvalidExport;
+    if (request.cases.len == 0 or request.cases.len > 64) return error.InvalidCaseCount;
+    if (request.limits.fuel_per_case == 0 or request.limits.fuel_per_case > 10_000_000) return error.InvalidFuelLimit;
+    if (request.limits.memory_bytes < page or request.limits.memory_bytes > 64 * 1024 * 1024) return error.InvalidMemoryLimit;
+    for (request.cases, 0..) |case, index| {
+        if (case.name.len == 0 or case.name.len > 128) return error.InvalidCase;
+        if (!std.mem.eql(u8, case.arguments[0].type, "list<u8,4>")) return error.InvalidComponentArgumentType;
+        for (request.cases[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, case.name)) return error.DuplicateCaseName;
+        }
+    }
+}
+
+fn executeComponent(allocator: std.mem.Allocator, bytes: []const u8, request: ComponentRequest) !ComponentExecution {
+    try validateComponentRequest(request);
+    const resolved = component_runtime.resolve(allocator, bytes, request.@"export") catch |err| return .{ .unsupported = @errorName(err) };
+    const rt = runtime.Runtime.init(allocator);
+    var parsed = rt.parseModule(resolved.module_bytes) catch |err| return .{ .unsupported = @errorName(err) };
+    defer parsed.deinit(allocator);
+    // The supported canonical ABI flattens the value; memory is never used to
+    // invent a pointer convention at the component boundary.
+    if (parsed.imports.items.len != 0 or parsed.tables.items.len != 0 or parsed.memories.items.len > 1) return .{ .unsupported = "component core imports, tables or multiple memories are outside this profile" };
+    const initial_bytes: usize = if (parsed.memories.items.len == 0) 0 else @as(usize, parsed.memories.items[0].limits.min) * page;
+    if (initial_bytes > request.limits.memory_bytes) return .{ .unsupported = "minimum memory exceeds requested budget" };
+    rt.validateModule(&parsed) catch |err| return .{ .unsupported = @errorName(err) };
+    const observations = try allocator.alloc(ComponentObservation, request.cases.len);
+    for (request.cases, observations) |case, *observation| {
+        observation.* = try observeComponent(&parsed, initial_bytes, resolved.core_export, request.limits, case);
+    }
+    return .{ .observed = observations };
+}
+
+fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, core_export: []const u8, limits: Limits, case: ComponentCase) !ComponentObservation {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const rt = runtime.Runtime.init(arena.allocator());
+    var instance = rt.instantiate(parsed, initial_bytes) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .initialization), .fuel_consumed = 0 };
+    defer instance.deinit();
+    instance.max_memory_bytes = limits.memory_bytes;
+    var interpreter = Interpreter.init(&instance);
+    interpreter.fuel_remaining = limits.fuel_per_case;
+    interpreter.runStart() catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .initialization), .fuel_consumed = interpreter.fuel_consumed };
+    var arguments: [4]runtime.interpreter.Value = undefined;
+    for (case.arguments[0].value, &arguments) |byte, *argument| argument.* = .{ .i32 = byte };
+    const returned = interpreter.callExport(core_export, &arguments) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+    const value = returned orelse return error.UnexpectedRuntimeResult;
+    if (value != .i32) return error.UnexpectedRuntimeResult;
+    // i32 carries the bit pattern of a canonical unsigned u32 result.
+    return .{ .name = case.name, .outcome = .{ .returned = value.i32 }, .fuel_consumed = interpreter.fuel_consumed };
+}
+
+fn componentFailure(err: anyerror, stage: ComponentStage) ComponentOutcome {
+    if (err == error.FuelExhausted) return .{ .fuel_exhausted = stage };
+    return .{ .failed = .{ .stage = stage, .diagnostic = @errorName(err) } };
 }
 
 fn executeLinkedRequest(allocator: std.mem.Allocator, json: []const u8) !void {

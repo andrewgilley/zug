@@ -1,15 +1,16 @@
 # Local Plexus executor bridge
 
 `zug-plexus` implements protocols `plexus-executor/1` and, for linked modules,
-`plexus-executor/2`. Plexus owns plans, archived
+`plexus-executor/2`, and a bounded component profile in `plexus-executor/3`. Plexus owns plans, archived
 artifacts, expected answers and interpretation. The worker only executes a pinned
-core Wasm module and reports observations. It never accepts expected answers.
+Wasm workload and reports observations. It never accepts expected answers.
 
 Build and check with Zig 0.16:
 
 ```sh
 zig build plexus test-plexus
 python3 tests/plexus_bridge.py
+python3 tests/component_bridge.py
 zig-out/bin/zug-plexus describe
 ```
 
@@ -34,7 +35,7 @@ execution with exit status zero. There is no long-running server or networking.
 Description response:
 
 ```json
-{"schema_version":1,"protocol":"plexus-executor/1","backend":"zug","version":"0.0.1","capabilities":{"fuel":true,"memory_limit":true,"max_results":1,"memory_input":true,"memory_bytes":true,"linked_modules":true}}
+{"schema_version":1,"protocol":"plexus-executor/1","backend":"zug","version":"0.0.1","capabilities":{"fuel":true,"memory_limit":true,"max_results":1,"memory_input":true,"memory_bytes":true,"linked_modules":true,"component_fixed_list":true}}
 ```
 
 `linked_modules` is an additive capability: the worker also accepts
@@ -77,7 +78,7 @@ A fresh instance is created for every case. Memory starts at its declared
 minimum (including zero pages), not at the host cap. `memory.grow` respects both
 the module maximum and the host cap, returning -1 when growth is denied. Tables,
 host imports, multiple memories, shared memory, memory64 and custom page sizes
-are outside this bridge's current profile. Component execution is unsupported.
+are outside this core profile. Components use the separate v3 profile below.
 The existing Zug validator also rejects instructions it does not implement.
 
 Execution response:
@@ -164,3 +165,36 @@ The response echoes `modules` (names and digests, in order) in place of
 could not be linked as declared. Imported memories, tables and globals are
 reported as `unsupported`. The schemas and fixtures live in the workspace's
 `contracts/plexus-executor-2`.
+
+## Fixed-list components (`plexus-executor/3`)
+
+The `component_fixed_list` capability advertises profile `fixed-list-u8-u32/1`.
+The request supplies `component_path`, `component_digest`, a named component
+`export`, typed cases (`arguments: [{"type":"list<u8,4>","value":[0,128,254,255]}]`),
+limits and an empty `host_grants` array. Schemas and examples live in the workspace's
+`contracts/plexus-executor-3` directory.
+
+Zug reads the complete component once, verifies its digest, and resolves its
+core module, instance, export aliases, component types, canonical lifts and
+component exports before execution. It checks the selected component function
+has one `list<u8,4>` parameter and a `u32` result, and that its core function takes
+four `i32` values and returns one `i32`. Every declaration is validated, including
+unselected lifts. Export names and indices are resolved from the bytes.
+
+This first profile permits exactly one core module and instance, supported
+primitive/fixed-list/function types, lowercase kebab names and lifts without
+canonical options. It rejects imports, tables, resources, dynamic lists, nested
+components and unsupported declarations. Component bytes are capped at 1 MiB,
+declaration counts and names are bounded, and case/resource limits match v1.
+
+Each case starts a fresh instance. Initialization and invocation share fuel;
+the guest memory cap applies throughout. Four bytes lower to four core `i32`
+arguments, and the result's bits lift to an unsigned `u32`. Returned values have
+shape `[{"type":"u32","value":637}]`. Observations include fuel use and an empty
+host trace. Failures retain their stage; unsupported components return no case
+evidence. No expected values enter the worker.
+
+Plexus archives responses and compares identical typed cases against Wasmtime.
+Matching values establish agreement only for those cases. Fuel exhaustion and
+failures remain inconclusive across runtimes. This does not establish general
+Component Model conformance or support the later WASI analyzer workload yet.
