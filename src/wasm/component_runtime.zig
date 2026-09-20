@@ -1,7 +1,7 @@
-//! Executable, deliberately bounded Component Model profile: list<u8, 4> -> u32
-//! and list<u8> -> u32. Decode all declarations before allowing any guest code
-//! to run. References are resolved in declaration order in their respective
-//! index spaces, not by layout.
+//! Executable, deliberately bounded Component Model profile: list<u8, 4> -> u32,
+//! list<u8> -> u32 and list<u8> -> list<u8>. Decode all declarations before
+//! allowing any guest code to run. References are resolved in declaration order
+//! in their respective index spaces, not by layout.
 const std = @import("std");
 const module = @import("module.zig");
 const validator = @import("validator.zig");
@@ -54,6 +54,43 @@ pub const Allocation = struct {
     realloc_index: u32,
 };
 
+// wat 0.259.0 output from Plexus fixtures/fixed-length-lists/component/scan.wat.
+// Its lift declares a list result, with memory, realloc and post-return.
+const scan_component =
+    "\x00\x61\x73\x6d\x0d\x00\x01\x00\x01\x87\x03\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x13\x03\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02" ++
+    "\x7f\x7f\x01\x7f\x60\x01\x7f\x00\x03\x04\x03\x00\x01\x02\x05\x03\x01\x00\x01\x06\x0b\x02\x7f\x01\x41\x08\x0b\x7f\x01\x41\x00\x0b" ++
+    "\x07\x31\x04\x06\x6d\x65\x6d\x6f\x72\x79\x02\x00\x0c\x63\x61\x62\x69\x5f\x72\x65\x61\x6c\x6c\x6f\x63\x00\x00\x04\x73\x63\x61\x6e" ++
+    "\x00\x01\x0e\x63\x61\x62\x69\x5f\x70\x6f\x73\x74\x5f\x73\x63\x61\x6e\x00\x02\x0a\x86\x01\x03\x20\x01\x01\x7f\x23\x00\x20\x02\x41" ++
+    "\x01\x6b\x6a\x20\x02\x41\x01\x6b\x41\x7f\x73\x71\x21\x04\x20\x04\x20\x03\x6a\x24\x00\x20\x04\x0b\x59\x01\x04\x7f\x41\x00\x41\x00" ++
+    "\x41\x01\x20\x01\x10\x00\x21\x02\x02\x40\x03\x40\x20\x04\x20\x01\x4f\x0d\x01\x20\x05\x20\x00\x20\x04\x6a\x2d\x00\x00\x6a\x21\x05" ++
+    "\x20\x02\x20\x04\x6a\x20\x05\x3a\x00\x00\x20\x04\x41\x01\x6a\x21\x04\x0c\x00\x0b\x0b\x41\x00\x41\x00\x41\x04\x41\x08\x10\x00\x21" ++
+    "\x03\x20\x03\x20\x02\x36\x02\x00\x20\x03\x20\x01\x36\x02\x04\x20\x03\x0b\x09\x00\x23\x01\x41\x01\x6a\x24\x01\x0b\x00\x93\x01\x04" ++
+    "\x6e\x61\x6d\x65\x00\x05\x04\x73\x63\x61\x6e\x01\x0b\x01\x00\x08\x61\x6c\x6c\x6f\x63\x61\x74\x65\x02\x4f\x03\x00\x05\x00\x03\x6f" ++
+    "\x6c\x64\x01\x08\x6f\x6c\x64\x5f\x73\x69\x7a\x65\x02\x05\x61\x6c\x69\x67\x6e\x03\x04\x73\x69\x7a\x65\x04\x03\x70\x74\x72\x01\x06" ++
+    "\x00\x03\x70\x74\x72\x01\x03\x6c\x65\x6e\x02\x03\x6f\x75\x74\x03\x04\x61\x72\x65\x61\x04\x05\x69\x6e\x64\x65\x78\x05\x03\x73\x75" ++
+    "\x6d\x02\x01\x00\x04\x61\x72\x65\x61\x03\x14\x01\x01\x02\x00\x04\x64\x6f\x6e\x65\x01\x09\x6e\x65\x78\x74\x2d\x62\x79\x74\x65\x07" ++
+    "\x11\x02\x00\x04\x6e\x65\x78\x74\x01\x08\x72\x65\x6c\x65\x61\x73\x65\x64\x02\x04\x01\x00\x00\x00\x06\x30\x03\x00\x02\x01\x00\x06" ++
+    "\x6d\x65\x6d\x6f\x72\x79\x00\x00\x01\x00\x0c\x63\x61\x62\x69\x5f\x72\x65\x61\x6c\x6c\x6f\x63\x00\x00\x01\x00\x0e\x63\x61\x62\x69" ++
+    "\x5f\x70\x6f\x73\x74\x5f\x73\x63\x61\x6e\x07\x0e\x02\x70\x7d\x40\x01\x05\x62\x79\x74\x65\x73\x00\x00\x00\x06\x0a\x01\x00\x00\x01" ++
+    "\x00\x04\x73\x63\x61\x6e\x08\x0c\x01\x00\x00\x02\x03\x03\x00\x04\x00\x05\x01\x01\x0b\x0a\x01\x00\x04\x73\x63\x61\x6e\x01\x00\x00" ++
+    "\x00\x6d\x0e\x63\x6f\x6d\x70\x6f\x6e\x65\x6e\x74\x2d\x6e\x61\x6d\x65\x01\x19\x00\x00\x02\x00\x07\x72\x65\x61\x6c\x6c\x6f\x63\x01" ++
+    "\x0b\x70\x6f\x73\x74\x2d\x72\x65\x74\x75\x72\x6e\x01\x0b\x00\x02\x01\x00\x06\x6d\x65\x6d\x6f\x72\x79\x01\x09\x00\x11\x01\x00\x04" ++
+    "\x73\x63\x61\x6e\x01\x13\x00\x12\x01\x00\x0e\x69\x6d\x70\x6c\x65\x6d\x65\x6e\x74\x61\x74\x69\x6f\x6e\x01\x14\x03\x02\x00\x05\x62" ++
+    "\x79\x74\x65\x73\x01\x09\x73\x63\x61\x6e\x2d\x74\x79\x70\x65";
+
+/// How the canonical ABI carries the result back out of the lifted function.
+pub const Lifting = union(enum) {
+    /// A u32 fits in the one flattened core result.
+    scalar,
+    /// A list does not, so the callee returns a pointer to its own return area
+    /// holding the pointer and length, and post-return releases it afterwards.
+    memory: ReturnArea,
+};
+
+pub const ReturnArea = struct {
+    post_return_export: ?[]const u8,
+};
+
 /// Slices borrow the input component. No allocation survives resolve().
 pub const Resolved = struct {
     module_bytes: []const u8,
@@ -62,14 +99,19 @@ pub const Resolved = struct {
     component_function_index: u32,
     component_type_index: u32,
     lowering: Lowering,
+    lifting: Lifting,
 };
 
 /// Whether a component function takes a fixed-length list or one of any length.
 const Parameter = enum { fixed_bytes, list_bytes };
 
+/// Whether it answers with a scalar or with a list.
+const ResultType = enum { u32_result, list_result };
+
 const Signature = struct {
     name: []const u8, // Parameter name is part of component function typing.
     parameter: Parameter,
+    result: ResultType,
 };
 
 const Type = union(enum) {
@@ -80,7 +122,7 @@ const Type = union(enum) {
     function: Signature,
 };
 const CoreFunction = struct { name: []const u8, index: u32 };
-const Function = struct { core: CoreFunction, type_index: u32, lowering: Lowering };
+const Function = struct { core: CoreFunction, type_index: u32, lowering: Lowering, lifting: Lifting };
 
 pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []const u8) !Resolved {
     if (bytes.len > max_component_bytes) return error.ComponentTooLarge;
@@ -183,9 +225,13 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                                 .list_bytes => .list_bytes,
                                 else => return error.UnsupportedComponentSignature,
                             };
-                            if (try section.byte() != 0 or try valueType(&section, types.items) != .u32_type)
-                                return error.UnsupportedComponentSignature;
-                            break :blk .{ .function = .{ .name = name, .parameter = parameter } };
+                            if (try section.byte() != 0) return error.UnsupportedComponentSignature;
+                            const answer: ResultType = switch (try valueType(&section, types.items)) {
+                                .u32_type => .u32_result,
+                                .list_bytes => .list_result,
+                                else => return error.UnsupportedComponentSignature,
+                            };
+                            break :blk .{ .function = .{ .name = name, .parameter = parameter, .result = answer } };
                         },
                         else => return error.UnsupportedComponentType,
                     };
@@ -202,9 +248,11 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                     const type_index = try section.u32leb();
                     try functionType(types.items, type_index);
                     const core = core_functions.items[core_index];
-                    const lowered = try lowering(types.items[type_index].function.parameter, options, parsed.?);
+                    const signature = types.items[type_index].function;
+                    const lowered = try lowering(signature.parameter, options, parsed.?);
+                    const lifted = try lifting(signature.result, options, parsed.?);
                     try checkCoreSignature(parsed.?, core.index, lowered);
-                    try appendBounded(Function, allocator, &functions, .{ .core = core, .type_index = type_index, .lowering = lowered });
+                    try appendBounded(Function, allocator, &functions, .{ .core = core, .type_index = type_index, .lowering = lowered, .lifting = lifted });
                 }
             },
             11 => {
@@ -229,7 +277,8 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                             try functionType(types.items, type_index);
                             const declared = types.items[type_index].function;
                             const actual = types.items[func.type_index].function;
-                            if (!std.mem.eql(u8, declared.name, actual.name) or declared.parameter != actual.parameter)
+                            if (!std.mem.eql(u8, declared.name, actual.name) or
+                                declared.parameter != actual.parameter or declared.result != actual.result)
                                 return error.ComponentExportTypeMismatch;
                         },
                         else => return error.InvalidComponentExportType,
@@ -241,6 +290,7 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                         .component_function_index = index,
                         .component_type_index = func.type_index,
                         .lowering = func.lowering,
+                        .lifting = func.lifting,
                     };
                     try appendBounded([]const u8, allocator, &export_names, name);
                     // Component exports introduce another item in the corresponding
@@ -329,6 +379,7 @@ fn findCoreFunction(parsed: module.Module, name: []const u8) !CoreFunction {
 const Options = struct {
     memory: ?u32 = null,
     realloc: ?CoreFunction = null,
+    post_return: ?CoreFunction = null,
 };
 
 /// Canonical options, in the binary encoding. Only what a list of unknown
@@ -340,7 +391,7 @@ fn canonicalOptions(
 ) !Options {
     var options = Options{};
     const count = try section.u32leb();
-    if (count > 2) return error.UnsupportedCanonicalOptions;
+    if (count > 3) return error.UnsupportedCanonicalOptions;
     for (0..count) |_| {
         switch (try section.byte()) {
             0x03 => {
@@ -355,6 +406,12 @@ fn canonicalOptions(
                 if (index >= core_functions.len) return error.InvalidCanonicalFunctionIndex;
                 options.realloc = core_functions[index];
             },
+            0x05 => {
+                if (options.post_return != null) return error.DuplicateCanonicalOption;
+                const index = try section.u32leb();
+                if (index >= core_functions.len) return error.InvalidCanonicalFunctionIndex;
+                options.post_return = core_functions[index];
+            },
             else => return error.UnsupportedCanonicalOptions,
         }
     }
@@ -366,20 +423,45 @@ fn lowering(parameter: Parameter, options: Options, parsed: module.Module) !Lowe
     switch (parameter) {
         .fixed_bytes => {
             // Four flattened i32 parameters need no memory and no allocator.
-            if (options.memory != null or options.realloc != null) return error.UnsupportedCanonicalOptions;
+            if (options.realloc != null) return error.UnsupportedCanonicalOptions;
             return .{ .flattened = 4 };
         },
         .list_bytes => {
-            const memory = options.memory orelse return error.MissingCanonicalMemory;
             const realloc = options.realloc orelse return error.MissingCanonicalRealloc;
-            // This profile runs one core instance, whose only memory is index 0.
-            if (memory != 0) return error.UnsupportedCanonicalMemoryIndex;
+            try checkMemoryOption(options);
             try checkReallocSignature(parsed, realloc.index);
             return .{ .memory = .{ .realloc_export = realloc.name, .realloc_index = realloc.index } };
         },
     }
 }
 
+/// Match the declared result against the options that can carry it back.
+fn lifting(result: ResultType, options: Options, parsed: module.Module) !Lifting {
+    switch (result) {
+        .u32_result => {
+            // One flattened core result needs no return area to release.
+            if (options.post_return != null) return error.UnsupportedCanonicalOptions;
+            return .scalar;
+        },
+        .list_result => {
+            try checkMemoryOption(options);
+            if (options.post_return) |post_return| {
+                try checkPostReturnSignature(parsed, post_return.index);
+                return .{ .memory = .{ .post_return_export = post_return.name } };
+            }
+            return .{ .memory = .{ .post_return_export = null } };
+        },
+    }
+}
+
+fn checkMemoryOption(options: Options) !void {
+    const memory = options.memory orelse return error.MissingCanonicalMemory;
+    // This profile runs one core instance, whose only memory is index 0.
+    if (memory != 0) return error.UnsupportedCanonicalMemoryIndex;
+}
+
+/// The lowering fixes the core parameters; the lifting keeps one core result,
+/// which is either the u32 itself or the pointer to the callee's return area.
 fn checkCoreSignature(parsed: module.Module, index: u32, lowered: Lowering) !void {
     if (index >= parsed.functions.items.len) return error.InvalidCoreFunctionIndex;
     const typ = try parsed.functionType(parsed.functions.items[index].type_index);
@@ -390,6 +472,14 @@ fn checkCoreSignature(parsed: module.Module, index: u32, lowered: Lowering) !voi
     };
     if (!std.mem.eql(module.ValueType, typ.params, expected) or
         !std.mem.eql(module.ValueType, typ.results, &.{.i32})) return error.CanonicalSignatureMismatch;
+}
+
+fn checkPostReturnSignature(parsed: module.Module, index: u32) !void {
+    if (index >= parsed.functions.items.len) return error.InvalidCoreFunctionIndex;
+    const typ = try parsed.functionType(parsed.functions.items[index].type_index);
+    // Post-return receives the core results it is releasing, and answers nothing.
+    if (!std.mem.eql(module.ValueType, typ.params, &.{.i32}) or typ.results.len != 0)
+        return error.PostReturnSignatureMismatch;
 }
 
 fn checkReallocSignature(parsed: module.Module, index: u32) !void {
@@ -633,4 +723,14 @@ test "a lifted list needs both canonical options, and the core signature they im
         "\x08\x08\x01\x00\x00\x01\x01\x04\x00\x01" ++
         list_component[362..];
     try std.testing.expectError(error.MissingCanonicalMemory, resolve(std.testing.allocator, without_memory, "checksum"));
+}
+
+test "a list answer resolves to a return area the component releases" {
+    const resolved = try resolve(std.testing.allocator, scan_component, "scan");
+    try std.testing.expectEqualStrings("scan", resolved.core_export);
+    try std.testing.expectEqualStrings("cabi_realloc", resolved.lowering.memory.realloc_export);
+    try std.testing.expectEqualStrings("cabi_post_scan", resolved.lifting.memory.post_return_export.?);
+    // A scalar answer rides in the core result, so it releases nothing.
+    const scalar = try resolve(std.testing.allocator, list_component, "checksum");
+    try std.testing.expectEqual(Lifting.scalar, scalar.lifting);
 }

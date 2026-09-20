@@ -106,14 +106,37 @@ const ComponentRequest = struct {
 };
 const ComponentEnvelope = struct { schema_version: u32, protocol: []const u8, component_path: []const u8, component_digest: []const u8, request: ComponentRequest };
 const ComponentStage = enum { component_validation, initialization, invocation };
+/// One canonical value, as the component's declared type carries it.
+const ComponentValue = union(enum) {
+    scalar: u32,
+    bytes: []const u8,
+
+    pub fn jsonStringify(self: ComponentValue, out: *std.json.Stringify) !void {
+        switch (self) {
+            .scalar => |value| try out.write(.{ .type = "u32", .value = value }),
+            .bytes => |value| {
+                // A list of u8 is a JSON array of numbers, not a string: these
+                // are canonical values, and not every byte sequence is text.
+                try out.beginObject();
+                try out.objectField("type");
+                try out.write("list<u8>");
+                try out.objectField("value");
+                try out.beginArray();
+                for (value) |byte| try out.write(byte);
+                try out.endArray();
+                try out.endObject();
+            },
+        }
+    }
+};
 const ComponentOutcome = union(enum) {
-    returned: u32,
+    returned: ComponentValue,
     fuel_exhausted: ComponentStage,
     failed: struct { stage: ComponentStage, diagnostic: []const u8 },
 
     pub fn jsonStringify(self: ComponentOutcome, out: *std.json.Stringify) !void {
         switch (self) {
-            .returned => |value| try out.write(.{ .kind = "returned", .values = .{.{ .type = "u32", .value = value }} }),
+            .returned => |value| try out.write(.{ .kind = "returned", .values = .{value} }),
             .fuel_exhausted => |stage| try out.write(.{ .kind = "fuel_exhausted", .stage = stage }),
             .failed => |v| try out.write(.{ .kind = "failed", .stage = v.stage, .diagnostic = v.diagnostic }),
         }
@@ -182,7 +205,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
             .protocol = protocol,
             .backend = "zug",
             .version = "0.0.1",
-            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true, .component_fixed_list = true, .component_list = true },
+            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true, .component_fixed_list = true, .component_list = true, .component_list_result = true },
         });
         return;
     }
@@ -239,11 +262,25 @@ fn executeComponentRequest(allocator: std.mem.Allocator, json: []const u8) !void
     try emit(allocator, .{ .schema_version = 1, .protocol = component_protocol, .component_digest = &digest, .execution = execution });
 }
 
-/// Each profile names the canonical shape of the one argument it carries.
-fn argumentType(profile: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, profile, "fixed-list-u8-u32/1")) return "list<u8,4>";
-    if (std.mem.eql(u8, profile, "list-u8-u32/1")) return "list<u8>";
+/// Each profile names one canonical shape: the argument it carries in, and the
+/// answer it carries back out.
+const Profile = struct { name: []const u8, argument: []const u8, flattened: bool, scalar: bool };
+
+const profiles = [_]Profile{
+    .{ .name = "fixed-list-u8-u32/1", .argument = "list<u8,4>", .flattened = true, .scalar = true },
+    .{ .name = "list-u8-u32/1", .argument = "list<u8>", .flattened = false, .scalar = true },
+    .{ .name = "list-u8-list-u8/1", .argument = "list<u8>", .flattened = false, .scalar = false },
+};
+
+fn findProfile(name: []const u8) ?Profile {
+    for (profiles) |profile| {
+        if (std.mem.eql(u8, profile.name, name)) return profile;
+    }
     return null;
+}
+
+fn argumentType(profile: []const u8) ?[]const u8 {
+    return (findProfile(profile) orelse return null).argument;
 }
 
 fn validateComponentRequest(request: ComponentRequest) !void {
@@ -269,29 +306,29 @@ fn executeComponent(allocator: std.mem.Allocator, bytes: []const u8, request: Co
     const resolved = component_runtime.resolve(allocator, bytes, request.@"export") catch |err| return .{ .unsupported = @errorName(err) };
     // The request names the canonical shape it expects; the component's own
     // declaration decides what it is. A disagreement is not a case failure.
-    const matches = switch (resolved.lowering) {
-        .flattened => std.mem.eql(u8, request.profile, "fixed-list-u8-u32/1"),
-        .memory => std.mem.eql(u8, request.profile, "list-u8-u32/1"),
-    };
-    if (!matches) return .{ .unsupported = "the component's canonical shape is not the requested profile" };
+    const profile = findProfile(request.profile) orelse return .{ .unsupported = "unknown component profile" };
+    if (profile.flattened != (resolved.lowering == .flattened) or profile.scalar != (resolved.lifting == .scalar))
+        return .{ .unsupported = "the component's canonical shape is not the requested profile" };
     const rt = runtime.Runtime.init(allocator);
     var parsed = rt.parseModule(resolved.module_bytes) catch |err| return .{ .unsupported = @errorName(err) };
     defer parsed.deinit(allocator);
     // Nothing is granted from the host. A list of unknown length still travels
     // through the component's own memory, allocated by its own realloc.
     if (parsed.imports.items.len != 0 or parsed.tables.items.len != 0 or parsed.memories.items.len > 1) return .{ .unsupported = "component core imports, tables or multiple memories are outside this profile" };
-    if (resolved.lowering == .memory and parsed.memories.items.len != 1) return .{ .unsupported = "a canonical memory option needs the core module to define one memory" };
+    if ((resolved.lowering == .memory or resolved.lifting == .memory) and parsed.memories.items.len != 1)
+        return .{ .unsupported = "a canonical memory option needs the core module to define one memory" };
     const initial_bytes: usize = if (parsed.memories.items.len == 0) 0 else @as(usize, parsed.memories.items[0].limits.min) * page;
     if (initial_bytes > request.limits.memory_bytes) return .{ .unsupported = "minimum memory exceeds requested budget" };
     rt.validateModule(&parsed) catch |err| return .{ .unsupported = @errorName(err) };
     const observations = try allocator.alloc(ComponentObservation, request.cases.len);
     for (request.cases, observations) |case, *observation| {
-        observation.* = try observeComponent(&parsed, initial_bytes, resolved, request.limits, case);
+        observation.* = try observeComponent(allocator, &parsed, initial_bytes, resolved, request.limits, case);
     }
     return .{ .observed = observations };
 }
 
-fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, resolved: component_runtime.Resolved, limits: Limits, case: ComponentCase) !ComponentObservation {
+fn observeComponent(allocator: std.mem.Allocator, parsed: *const runtime.module.Module, initial_bytes: usize, resolved: component_runtime.Resolved, limits: Limits, case: ComponentCase) !ComponentObservation {
+    // Instance memory lives for this case only; anything reported outlives it.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const rt = runtime.Runtime.init(arena.allocator());
@@ -332,8 +369,32 @@ fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, 
     const returned = interpreter.callExport(resolved.core_export, lowered) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
     const value = returned orelse return error.UnexpectedRuntimeResult;
     if (value != .i32) return error.UnexpectedRuntimeResult;
-    // i32 carries the bit pattern of a canonical unsigned u32 result.
-    return .{ .name = case.name, .outcome = .{ .returned = value.i32 }, .fuel_consumed = interpreter.fuel_consumed };
+    switch (resolved.lifting) {
+        // i32 carries the bit pattern of a canonical unsigned u32 result.
+        .scalar => return .{ .name = case.name, .outcome = .{ .returned = .{ .scalar = value.i32 } }, .fuel_consumed = interpreter.fuel_consumed },
+        .memory => |area| {
+            // The callee answers with a pointer to its own return area, which
+            // holds the pointer and length of the list it allocated.
+            const lifted = liftList(allocator, &instance, value.i32) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+            // Post-return releases that area, and runs on the same budget.
+            if (area.post_return_export) |post_return| {
+                var release = [_]runtime.interpreter.Value{value};
+                _ = interpreter.callExport(post_return, &release) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+            }
+            return .{ .name = case.name, .outcome = .{ .returned = .{ .bytes = lifted } }, .fuel_consumed = interpreter.fuel_consumed };
+        },
+    }
+}
+
+/// Read a canonical list<u8> out of the component's memory, copying it before
+/// post-return can reuse the space.
+fn liftList(allocator: std.mem.Allocator, instance: *Instance, area: u32) ![]const u8 {
+    if (area > std.math.maxInt(i32) or area % 4 != 0) return error.InvalidReturnArea;
+    const pointer = try instance.memory().readU32(area);
+    const length = try instance.memory().readU32(area + 4);
+    if (length > max_list_bytes) return error.ReturnedListTooLong;
+    const bytes = try instance.memory().read(pointer, length);
+    return allocator.dupe(u8, bytes);
 }
 
 fn componentFailure(err: anyerror, stage: ComponentStage) ComponentOutcome {

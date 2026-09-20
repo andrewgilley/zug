@@ -33,6 +33,31 @@ REFERENCE = bytes.fromhex(
 )
 
 
+# Exact binary emitted for Plexus's scan WAT: list<u8> -> list<u8>, with a
+# return area and a post-return that counts its own release.
+SCAN = bytes.fromhex(
+    "0061736d0d0001000187030061736d0100000001130360047f7f7f7f017f6002"
+    "7f7f017f60017f000304030001020503010001060b027f0141080b7f0141000b"
+    "073104066d656d6f727902000c636162695f7265616c6c6f630000047363616e"
+    "00010e636162695f706f73745f7363616e00020a8601032001017f2300200241"
+    "016b6a200241016b417f73712104200420036a240020040b5901047f41004100"
+    "410120011000210202400340200420014f0d012005200020046a2d00006a2105"
+    "200220046a20053a0000200441016a21040c000b0b4100410041044108100021"
+    "03200320023602002003200136020420030b0900230141016a24010b00930104"
+    "6e616d650005047363616e010b010008616c6c6f63617465024f03000500036f"
+    "6c6401086f6c645f73697a650205616c69676e030473697a6504037074720106"
+    "000370747201036c656e02036f75740304617265610405696e64657805037375"
+    "6d020100046172656103140101020004646f6e6501096e6578742d6279746507"
+    "110200046e657874010872656c65617365640204010000000630030002010006"
+    "6d656d6f7279000001000c636162695f7265616c6c6f63000001000e63616269"
+    "5f706f73745f7363616e070e02707d4001056279746573000000060a01000001"
+    "00047363616e080c0100000203030004000501010b0a0100047363616e010000"
+    "006d0e636f6d706f6e656e742d6e616d65011900000200077265616c6c6f6301"
+    "0b706f73742d72657475726e010b00020100066d656d6f727901090011010004"
+    "7363616e0113001201000e696d706c656d656e746174696f6e01140302000562"
+    "7974657301097363616e2d74797065"
+)
+
 def core_module(code=SUM, *, export="checksum", memory=None, start=None,
                 shifted=False, parameters=4):
     types = b"\x01\x60" + leb(parameters) + b"\x7f" * parameters + b"\x01\x7f"
@@ -184,9 +209,25 @@ class ComponentBridgeTests(unittest.TestCase):
         self.assertEqual(execution["kind"], "unsupported", execution)
         self.assertTrue(execution["reason"])
 
+    def test_a_list_answer_returns_through_the_components_return_area(self):
+        cases = [self.list_case("ascending", [1, 2, 3, 4]),
+                 self.list_case("wraps-at-a-byte", [200, 100, 50])]
+        observations = self.observations(
+            self.execute(SCAN, export="scan", cases=cases, profile="list-u8-list-u8/1"))
+        self.assertEqual([case["outcome"]["values"] for case in observations],
+                         [[{"type": "list<u8>", "value": [1, 3, 6, 10]}],
+                          [{"type": "list<u8>", "value": [200, 44, 94]}]])
+
+    def test_a_scalar_profile_does_not_fit_a_list_answer(self):
+        cases = [self.list_case("ascending", [1, 2, 3, 4])]
+        self.unsupported(self.execute(SCAN, export="scan", cases=cases, profile="list-u8-u32/1"))
+        self.unsupported(self.execute(list_component(), cases=cases, profile="list-u8-list-u8/1"))
+
     def test_list_capability_is_advertised(self):
         result = subprocess.run([str(WORKER), "describe"], capture_output=True, text=True, check=True)
-        self.assertTrue(json.loads(result.stdout)["capabilities"]["component_list"])
+        capabilities = json.loads(result.stdout)["capabilities"]
+        self.assertTrue(capabilities["component_list"])
+        self.assertTrue(capabilities["component_list_result"])
 
     def test_list_of_unknown_length_travels_through_component_memory(self):
         cases = [self.list_case("single", [7]),
