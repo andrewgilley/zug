@@ -58,6 +58,33 @@ SCAN = bytes.fromhex(
     "7974657301097363616e2d74797065"
 )
 
+# Exact binary emitted for Plexus's summarize WAT: string -> record, whose
+# record type the component must export before it can answer with it.
+SUMMARIZE = bytes.fromhex(
+    "0061736d0d00010001f7020061736d0100000001130360047f7f7f7f017f6002"
+    "7f7f017f60017f0003040300010205030100010606017f0141080b073b04066d"
+    "656d6f727902000c636162695f7265616c6c6f6300000973756d6d6172697a65"
+    "000113636162695f706f73745f73756d6d6172697a6500020a7a032001017f23"
+    "00200241016b6a200241016b417f73712104200420036a240020040b5401037f"
+    "4101210402400340200320014f0d012004200020036a2d0000410a466a210420"
+    "0341016a21030c000b0b410041004104410c1000210220022001360200200220"
+    "04360204200220002d00003a000820020b02000b008b01046e616d65000a0973"
+    "756d6d6172697a65010b010008616c6c6f63617465024c03000500036f6c6401"
+    "086f6c645f73697a650205616c69676e030473697a6504037074720105000370"
+    "747201036c656e0204617265610305696e64657804056c696e65730201000461"
+    "72656103140101020004646f6e6501096e6578742d6279746507070100046e65"
+    "787402040100000006350300020100066d656d6f7279000001000c636162695f"
+    "7265616c6c6f630000010013636162695f706f73745f73756d6d6172697a6507"
+    "1801720305627974657379056c696e6573790566697273747d0b0d0100077375"
+    "6d6d617279030000070b0140010474657874730001060f01000001000973756d"
+    "6d6172697a65080c0100000203030004000501020b0f01000973756d6d617269"
+    "7a650100000089010e636f6d706f6e656e742d6e616d65011900000200077265"
+    "616c6c6f63010b706f73742d72657475726e010b00020100066d656d6f727901"
+    "0e001101000973756d6d6172697a650113001201000e696d706c656d656e7461"
+    "74696f6e012b0303000773756d6d617279010e73756d6d6172792d6578706f72"
+    "74020e73756d6d6172697a652d74797065"
+)
+
 def core_module(code=SUM, *, export="checksum", memory=None, start=None,
                 shifted=False, parameters=4):
     types = b"\x01\x60" + leb(parameters) + b"\x7f" * parameters + b"\x01\x7f"
@@ -223,11 +250,35 @@ class ComponentBridgeTests(unittest.TestCase):
         self.unsupported(self.execute(SCAN, export="scan", cases=cases, profile="list-u8-u32/1"))
         self.unsupported(self.execute(list_component(), cases=cases, profile="list-u8-list-u8/1"))
 
+    def test_a_string_argument_and_a_record_answer(self):
+        cases = [{"name": "one-line",
+                  "arguments": [{"type": "string", "value": "hello"}]},
+                 {"name": "multi-byte",
+                  "arguments": [{"type": "string", "value": "h\u00e9llo"}]}]
+        observations = self.observations(
+            self.execute(SUMMARIZE, export="summarize", cases=cases, profile="string-record/1"))
+        self.assertEqual([case["outcome"]["values"] for case in observations],
+                         [[{"type": "record", "value": {"bytes": 5, "lines": 1, "first": 104}}],
+                          [{"type": "record", "value": {"bytes": 6, "lines": 1, "first": 104}}]])
+
+    def test_a_string_is_written_as_text_and_must_be_valid(self):
+        for value in [[104, 105], 5, None, "", "x" * 257]:
+            with self.subTest(value=value):
+                self.rejected(self.execute(SUMMARIZE, export="summarize", profile="string-record/1",
+                                           cases=[{"name": "invalid",
+                                                   "arguments": [{"type": "string", "value": value}]}]))
+        # A list of bytes is not a string, whichever way round.
+        self.rejected(self.execute(SUMMARIZE, export="summarize", profile="string-record/1",
+                                   cases=[self.list_case("mistyped", [1, 2, 3])]))
+        self.unsupported(self.execute(SUMMARIZE, export="summarize", profile="list-u8-list-u8/1",
+                                      cases=[self.list_case("mistyped", [1, 2, 3])]))
+
     def test_list_capability_is_advertised(self):
         result = subprocess.run([str(WORKER), "describe"], capture_output=True, text=True, check=True)
         capabilities = json.loads(result.stdout)["capabilities"]
         self.assertTrue(capabilities["component_list"])
         self.assertTrue(capabilities["component_list_result"])
+        self.assertTrue(capabilities["component_record"])
 
     def test_list_of_unknown_length_travels_through_component_memory(self):
         cases = [self.list_case("single", [7]),

@@ -1,5 +1,6 @@
-//! Executable, deliberately bounded Component Model profile: list<u8, 4> -> u32,
-//! list<u8> -> u32 and list<u8> -> list<u8>. Decode all declarations before
+//! Executable, deliberately bounded Component Model profile. An argument is a
+//! fixed list of four bytes, a list<u8> or a string; an answer is a u32, a
+//! list<u8> or a record of u8 and u32 fields. Decode all declarations before
 //! allowing any guest code to run. References are resolved in declaration order
 //! in their respective index spaces, not by layout.
 const std = @import("std");
@@ -78,13 +79,104 @@ const scan_component =
     "\x73\x63\x61\x6e\x01\x13\x00\x12\x01\x00\x0e\x69\x6d\x70\x6c\x65\x6d\x65\x6e\x74\x61\x74\x69\x6f\x6e\x01\x14\x03\x02\x00\x05\x62" ++
     "\x79\x74\x65\x73\x01\x09\x73\x63\x61\x6e\x2d\x74\x79\x70\x65";
 
+// wat 0.259.0 output from Plexus fixtures/fixed-length-lists/component/summarize.wat.
+// It takes a string and answers with a record, whose type it must export too.
+const summarize_component =
+    "\x00\x61\x73\x6d\x0d\x00\x01\x00\x01\xf7\x02\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x13\x03\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02" ++
+    "\x7f\x7f\x01\x7f\x60\x01\x7f\x00\x03\x04\x03\x00\x01\x02\x05\x03\x01\x00\x01\x06\x06\x01\x7f\x01\x41\x08\x0b\x07\x3b\x04\x06\x6d" ++
+    "\x65\x6d\x6f\x72\x79\x02\x00\x0c\x63\x61\x62\x69\x5f\x72\x65\x61\x6c\x6c\x6f\x63\x00\x00\x09\x73\x75\x6d\x6d\x61\x72\x69\x7a\x65" ++
+    "\x00\x01\x13\x63\x61\x62\x69\x5f\x70\x6f\x73\x74\x5f\x73\x75\x6d\x6d\x61\x72\x69\x7a\x65\x00\x02\x0a\x7a\x03\x20\x01\x01\x7f\x23" ++
+    "\x00\x20\x02\x41\x01\x6b\x6a\x20\x02\x41\x01\x6b\x41\x7f\x73\x71\x21\x04\x20\x04\x20\x03\x6a\x24\x00\x20\x04\x0b\x54\x01\x03\x7f" ++
+    "\x41\x01\x21\x04\x02\x40\x03\x40\x20\x03\x20\x01\x4f\x0d\x01\x20\x04\x20\x00\x20\x03\x6a\x2d\x00\x00\x41\x0a\x46\x6a\x21\x04\x20" ++
+    "\x03\x41\x01\x6a\x21\x03\x0c\x00\x0b\x0b\x41\x00\x41\x00\x41\x04\x41\x0c\x10\x00\x21\x02\x20\x02\x20\x01\x36\x02\x00\x20\x02\x20" ++
+    "\x04\x36\x02\x04\x20\x02\x20\x00\x2d\x00\x00\x3a\x00\x08\x20\x02\x0b\x02\x00\x0b\x00\x8b\x01\x04\x6e\x61\x6d\x65\x00\x0a\x09\x73" ++
+    "\x75\x6d\x6d\x61\x72\x69\x7a\x65\x01\x0b\x01\x00\x08\x61\x6c\x6c\x6f\x63\x61\x74\x65\x02\x4c\x03\x00\x05\x00\x03\x6f\x6c\x64\x01" ++
+    "\x08\x6f\x6c\x64\x5f\x73\x69\x7a\x65\x02\x05\x61\x6c\x69\x67\x6e\x03\x04\x73\x69\x7a\x65\x04\x03\x70\x74\x72\x01\x05\x00\x03\x70" ++
+    "\x74\x72\x01\x03\x6c\x65\x6e\x02\x04\x61\x72\x65\x61\x03\x05\x69\x6e\x64\x65\x78\x04\x05\x6c\x69\x6e\x65\x73\x02\x01\x00\x04\x61" ++
+    "\x72\x65\x61\x03\x14\x01\x01\x02\x00\x04\x64\x6f\x6e\x65\x01\x09\x6e\x65\x78\x74\x2d\x62\x79\x74\x65\x07\x07\x01\x00\x04\x6e\x65" ++
+    "\x78\x74\x02\x04\x01\x00\x00\x00\x06\x35\x03\x00\x02\x01\x00\x06\x6d\x65\x6d\x6f\x72\x79\x00\x00\x01\x00\x0c\x63\x61\x62\x69\x5f" ++
+    "\x72\x65\x61\x6c\x6c\x6f\x63\x00\x00\x01\x00\x13\x63\x61\x62\x69\x5f\x70\x6f\x73\x74\x5f\x73\x75\x6d\x6d\x61\x72\x69\x7a\x65\x07" ++
+    "\x18\x01\x72\x03\x05\x62\x79\x74\x65\x73\x79\x05\x6c\x69\x6e\x65\x73\x79\x05\x66\x69\x72\x73\x74\x7d\x0b\x0d\x01\x00\x07\x73\x75" ++
+    "\x6d\x6d\x61\x72\x79\x03\x00\x00\x07\x0b\x01\x40\x01\x04\x74\x65\x78\x74\x73\x00\x01\x06\x0f\x01\x00\x00\x01\x00\x09\x73\x75\x6d" ++
+    "\x6d\x61\x72\x69\x7a\x65\x08\x0c\x01\x00\x00\x02\x03\x03\x00\x04\x00\x05\x01\x02\x0b\x0f\x01\x00\x09\x73\x75\x6d\x6d\x61\x72\x69" ++
+    "\x7a\x65\x01\x00\x00\x00\x89\x01\x0e\x63\x6f\x6d\x70\x6f\x6e\x65\x6e\x74\x2d\x6e\x61\x6d\x65\x01\x19\x00\x00\x02\x00\x07\x72\x65" ++
+    "\x61\x6c\x6c\x6f\x63\x01\x0b\x70\x6f\x73\x74\x2d\x72\x65\x74\x75\x72\x6e\x01\x0b\x00\x02\x01\x00\x06\x6d\x65\x6d\x6f\x72\x79\x01" ++
+    "\x0e\x00\x11\x01\x00\x09\x73\x75\x6d\x6d\x61\x72\x69\x7a\x65\x01\x13\x00\x12\x01\x00\x0e\x69\x6d\x70\x6c\x65\x6d\x65\x6e\x74\x61" ++
+    "\x74\x69\x6f\x6e\x01\x2b\x03\x03\x00\x07\x73\x75\x6d\x6d\x61\x72\x79\x01\x0e\x73\x75\x6d\x6d\x61\x72\x79\x2d\x65\x78\x70\x6f\x72" ++
+    "\x74\x02\x0e\x73\x75\x6d\x6d\x61\x72\x69\x7a\x65\x2d\x74\x79\x70\x65";
+
+pub const max_fields = 8;
+
+/// A record field of this profile, at its canonical offset within the record.
+pub const Field = struct {
+    name: []const u8,
+    kind: FieldKind,
+    offset: u32,
+};
+
+pub const FieldKind = enum {
+    u8_field,
+    u32_field,
+
+    fn alignment(self: FieldKind) u32 {
+        return switch (self) {
+            .u8_field => 1,
+            .u32_field => 4,
+        };
+    }
+};
+
+/// Canonical record layout: each field at the next offset its own alignment
+/// allows, and a size rounded up to the record's alignment.
+pub const RecordLayout = struct {
+    entries: [max_fields]Field = undefined,
+    count: u8 = 0,
+    size: u32 = 0,
+    alignment: u32 = 1,
+
+    pub fn fields(self: *const RecordLayout) []const Field {
+        return self.entries[0..self.count];
+    }
+
+    fn append(self: *RecordLayout, name: []const u8, kind: FieldKind) !void {
+        if (self.count >= max_fields) return error.ComponentTooComplex;
+        for (self.fields()) |existing| {
+            if (std.mem.eql(u8, existing.name, name)) return error.DuplicateRecordField;
+        }
+        const offset = alignTo(self.size, kind.alignment());
+        self.entries[self.count] = .{ .name = name, .kind = kind, .offset = offset };
+        self.count += 1;
+        self.size = offset + kind.alignment();
+        self.alignment = @max(self.alignment, kind.alignment());
+    }
+
+    fn finish(self: *RecordLayout) !void {
+        if (self.count == 0) return error.UnsupportedComponentType;
+        self.size = alignTo(self.size, self.alignment);
+    }
+
+    fn equals(self: *const RecordLayout, other: *const RecordLayout) bool {
+        if (self.count != other.count) return false;
+        for (self.fields(), other.fields()) |left, right| {
+            if (left.kind != right.kind or !std.mem.eql(u8, left.name, right.name)) return false;
+        }
+        return true;
+    }
+};
+
+fn alignTo(offset: u32, alignment: u32) u32 {
+    return (offset + alignment - 1) & ~(alignment - 1);
+}
+
 /// How the canonical ABI carries the result back out of the lifted function.
 pub const Lifting = union(enum) {
     /// A u32 fits in the one flattened core result.
     scalar,
     /// A list does not, so the callee returns a pointer to its own return area
     /// holding the pointer and length, and post-return releases it afterwards.
-    memory: ReturnArea,
+    list: ReturnArea,
+    /// A record is written into the return area itself, field by field.
+    record: struct { area: ReturnArea, layout: RecordLayout },
 };
 
 pub const ReturnArea = struct {
@@ -98,27 +190,45 @@ pub const Resolved = struct {
     core_function_index: u32,
     component_function_index: u32,
     component_type_index: u32,
+    /// The declared argument, which the lowering alone does not distinguish:
+    /// a string and a list of bytes travel the same way but are not the same.
+    argument: Parameter,
     lowering: Lowering,
     lifting: Lifting,
 };
 
-/// Whether a component function takes a fixed-length list or one of any length.
-const Parameter = enum { fixed_bytes, list_bytes };
+/// What a component function takes: a fixed list of bytes, a list of any
+/// length, or a string, which travels as a list of UTF-8 bytes.
+pub const Parameter = enum { fixed_bytes, list_bytes, string };
 
-/// Whether it answers with a scalar or with a list.
-const ResultType = enum { u32_result, list_result };
+/// What it answers with.
+const ResultShape = union(enum) {
+    u32_result,
+    list_result,
+    record_result: RecordLayout,
+
+    fn equals(self: ResultShape, other: ResultShape) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        return switch (self) {
+            .record_result => |layout| layout.equals(&other.record_result),
+            else => true,
+        };
+    }
+};
 
 const Signature = struct {
     name: []const u8, // Parameter name is part of component function typing.
     parameter: Parameter,
-    result: ResultType,
+    result: ResultShape,
 };
 
 const Type = union(enum) {
     u8_type,
     u32_type,
+    string_type,
     fixed_bytes,
     list_bytes,
+    record: RecordLayout,
     function: Signature,
 };
 const CoreFunction = struct { name: []const u8, index: u32 };
@@ -216,6 +326,23 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                                 return error.UnsupportedComponentType;
                             break :blk .list_bytes;
                         },
+                        0x73 => .string_type,
+                        0x72 => blk: {
+                            var layout = RecordLayout{};
+                            const field_count = try section.u32leb();
+                            if (field_count > max_fields) return error.ComponentTooComplex;
+                            for (0..field_count) |_| {
+                                const field_name = try section.name();
+                                try simpleName(field_name);
+                                try layout.append(field_name, switch (try valueType(&section, types.items)) {
+                                    .u8_type => .u8_field,
+                                    .u32_type => .u32_field,
+                                    else => return error.UnsupportedComponentType,
+                                });
+                            }
+                            try layout.finish();
+                            break :blk .{ .record = layout };
+                        },
                         0x40 => blk: {
                             if (try section.u32leb() != 1) return error.UnsupportedComponentSignature;
                             const name = try section.name();
@@ -223,12 +350,14 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                             const parameter: Parameter = switch (try valueType(&section, types.items)) {
                                 .fixed_bytes => .fixed_bytes,
                                 .list_bytes => .list_bytes,
+                                .string_type => .string,
                                 else => return error.UnsupportedComponentSignature,
                             };
                             if (try section.byte() != 0) return error.UnsupportedComponentSignature;
-                            const answer: ResultType = switch (try valueType(&section, types.items)) {
+                            const answer: ResultShape = switch (try valueType(&section, types.items)) {
                                 .u32_type => .u32_result,
                                 .list_bytes => .list_result,
+                                .record => |layout| .{ .record_result = layout },
                                 else => return error.UnsupportedComponentSignature,
                             };
                             break :blk .{ .function = .{ .name = name, .parameter = parameter, .result = answer } };
@@ -265,7 +394,21 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                     for (export_names.items) |existing| {
                         if (std.mem.eql(u8, name, existing)) return error.DuplicateComponentExport;
                     }
-                    if (try section.byte() != 1) return error.UnsupportedComponentExport;
+                    const sort = try section.byte();
+                    // A type a function's signature mentions must itself be
+                    // exported, before the signature that references it.
+                    if (sort == 3) {
+                        const exported_type = try section.u32leb();
+                        if (exported_type >= types.items.len) return error.InvalidComponentTypeIndex;
+                        const aliased = types.items[exported_type];
+                        if (aliased == .function) return error.UnsupportedComponentExportType;
+                        // A bound would re-describe the type; this profile takes it as it stands.
+                        if (try section.byte() != 0) return error.UnsupportedComponentExportType;
+                        try appendBounded([]const u8, allocator, &export_names, name);
+                        try appendBounded(Type, allocator, &types, aliased);
+                        continue;
+                    }
+                    if (sort != 1) return error.UnsupportedComponentExport;
                     const index = try section.u32leb();
                     if (index >= functions.items.len) return error.InvalidComponentFunctionIndex;
                     const func = functions.items[index];
@@ -278,7 +421,8 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                             const declared = types.items[type_index].function;
                             const actual = types.items[func.type_index].function;
                             if (!std.mem.eql(u8, declared.name, actual.name) or
-                                declared.parameter != actual.parameter or declared.result != actual.result)
+                                declared.parameter != actual.parameter or
+                                !declared.result.equals(actual.result))
                                 return error.ComponentExportTypeMismatch;
                         },
                         else => return error.InvalidComponentExportType,
@@ -289,6 +433,7 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                         .core_function_index = func.core.index,
                         .component_function_index = index,
                         .component_type_index = func.type_index,
+                        .argument = types.items[func.type_index].function.parameter,
                         .lowering = func.lowering,
                         .lifting = func.lifting,
                     };
@@ -327,6 +472,10 @@ fn valueType(reader: *Reader, types: []const Type) !Type {
         0x79 => {
             reader.offset += 1;
             return .u32_type;
+        },
+        0x73 => {
+            reader.offset += 1;
+            return .string_type;
         },
         else => {},
     }
@@ -426,7 +575,8 @@ fn lowering(parameter: Parameter, options: Options, parsed: module.Module) !Lowe
             if (options.realloc != null) return error.UnsupportedCanonicalOptions;
             return .{ .flattened = 4 };
         },
-        .list_bytes => {
+        // A string is a list of UTF-8 bytes, carried the same way.
+        .list_bytes, .string => {
             const realloc = options.realloc orelse return error.MissingCanonicalRealloc;
             try checkMemoryOption(options);
             try checkReallocSignature(parsed, realloc.index);
@@ -436,22 +586,28 @@ fn lowering(parameter: Parameter, options: Options, parsed: module.Module) !Lowe
 }
 
 /// Match the declared result against the options that can carry it back.
-fn lifting(result: ResultType, options: Options, parsed: module.Module) !Lifting {
+fn lifting(result: ResultShape, options: Options, parsed: module.Module) !Lifting {
     switch (result) {
         .u32_result => {
             // One flattened core result needs no return area to release.
             if (options.post_return != null) return error.UnsupportedCanonicalOptions;
             return .scalar;
         },
-        .list_result => {
-            try checkMemoryOption(options);
-            if (options.post_return) |post_return| {
-                try checkPostReturnSignature(parsed, post_return.index);
-                return .{ .memory = .{ .post_return_export = post_return.name } };
-            }
-            return .{ .memory = .{ .post_return_export = null } };
-        },
+        .list_result => return .{ .list = try returnArea(options, parsed) },
+        .record_result => |layout| return .{ .record = .{
+            .area = try returnArea(options, parsed),
+            .layout = layout,
+        } },
     }
+}
+
+fn returnArea(options: Options, parsed: module.Module) !ReturnArea {
+    try checkMemoryOption(options);
+    if (options.post_return) |post_return| {
+        try checkPostReturnSignature(parsed, post_return.index);
+        return .{ .post_return_export = post_return.name };
+    }
+    return .{ .post_return_export = null };
 }
 
 fn checkMemoryOption(options: Options) !void {
@@ -630,7 +786,8 @@ test "component index spaces include types aliases canonical functions and expor
 }
 
 test "component resolver checks every declaration including trailing ones" {
-    try std.testing.expectError(error.UnsupportedComponentType, resolve(std.testing.allocator, reference_component ++ "\x07\x02\x01\x73", "checksum"));
+    // 0x74 is char, which this profile does not model.
+    try std.testing.expectError(error.UnsupportedComponentType, resolve(std.testing.allocator, reference_component ++ "\x07\x02\x01\x74", "checksum"));
     try std.testing.expectError(error.UnsupportedComponentSection, resolve(std.testing.allocator, reference_component ++ "\x09\x01\x00", "checksum"));
     try std.testing.expectError(error.ComponentImportsForbidden, resolve(std.testing.allocator, reference_component ++ "\x0a\x01\x00", "checksum"));
     try std.testing.expectError(error.TrailingComponentSectionBytes, resolve(std.testing.allocator, reference_component ++ "\x07\x02\x00\x00", "checksum"));
@@ -729,8 +886,28 @@ test "a list answer resolves to a return area the component releases" {
     const resolved = try resolve(std.testing.allocator, scan_component, "scan");
     try std.testing.expectEqualStrings("scan", resolved.core_export);
     try std.testing.expectEqualStrings("cabi_realloc", resolved.lowering.memory.realloc_export);
-    try std.testing.expectEqualStrings("cabi_post_scan", resolved.lifting.memory.post_return_export.?);
+    try std.testing.expectEqualStrings("cabi_post_scan", resolved.lifting.list.post_return_export.?);
     // A scalar answer rides in the core result, so it releases nothing.
     const scalar = try resolve(std.testing.allocator, list_component, "checksum");
     try std.testing.expectEqual(Lifting.scalar, scalar.lifting);
+}
+
+test "a string argument and a record answer resolve to their canonical layout" {
+    const resolved = try resolve(std.testing.allocator, summarize_component, "summarize");
+    try std.testing.expectEqual(Parameter.string, resolved.argument);
+    try std.testing.expectEqualStrings("cabi_post_summarize", resolved.lifting.record.area.post_return_export.?);
+
+    // Two u32 fields, then a u8: the layout follows each field's alignment,
+    // and the record's size is rounded up to the record's own alignment.
+    const layout = resolved.lifting.record.layout;
+    try std.testing.expectEqual(@as(u8, 3), layout.count);
+    try std.testing.expectEqual(@as(u32, 4), layout.alignment);
+    try std.testing.expectEqual(@as(u32, 12), layout.size);
+    const offsets = [_]u32{ 0, 4, 8 };
+    const names = [_][]const u8{ "bytes", "lines", "first" };
+    for (layout.fields(), offsets, names) |field, offset, name| {
+        try std.testing.expectEqualStrings(name, field.name);
+        try std.testing.expectEqual(offset, field.offset);
+    }
+    try std.testing.expectEqual(FieldKind.u8_field, layout.fields()[2].kind);
 }
