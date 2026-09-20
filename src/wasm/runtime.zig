@@ -38,6 +38,24 @@ pub const Runtime = struct {
         return instance.Instance.init(self.allocator, parsed_module, initial_memory_bytes);
     }
 
+    /// Instantiate against a memory an earlier instance exports, for
+    /// core-module linking. `imported` comes from `resolveImportedMemory`.
+    pub fn instantiateWithMemory(
+        self: Runtime,
+        parsed_module: *const module.Module,
+        initial_memory_bytes: usize,
+        imported: ?*instance.Memory,
+    ) !instance.Instance {
+        try self.validateModule(parsed_module);
+
+        return instance.Instance.initWithMemory(
+            self.allocator,
+            parsed_module,
+            initial_memory_bytes,
+            imported,
+        );
+    }
+
     pub fn validateModule(self: Runtime, parsed_module: *const module.Module) !void {
         try validator.validate(self.allocator, parsed_module);
     }
@@ -67,8 +85,8 @@ test "runtime parses and instantiates an empty module" {
     var wasm_instance = try runtime.instantiate(&parsed, 64 * 1024);
     defer wasm_instance.deinit();
 
-    try wasm_instance.memory.writeU32(8, 7);
-    try std.testing.expectEqual(@as(u32, 7), try wasm_instance.memory.readU32(8));
+    try wasm_instance.memory().writeU32(8, 7);
+    try std.testing.expectEqual(@as(u32, 7), try wasm_instance.memory().readU32(8));
 }
 
 test "runtime instantiates and runs module start function" {

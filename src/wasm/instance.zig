@@ -21,6 +21,42 @@ const IndexRange = struct {
     len: usize,
 };
 
+/// Linear memory, owned by the instance whose module defines it and shared
+/// with the instances that import it. The view lives behind this pointer, so
+/// growth by one holder is visible to every other.
+pub const Memory = struct {
+    allocator: std.mem.Allocator,
+    view: memory_module.LinearMemory,
+    /// The defining module's declared maximum, in pages.
+    max_pages: u32,
+
+    pub fn create(
+        allocator: std.mem.Allocator,
+        initial_bytes: usize,
+        max_pages: u32,
+    ) !*Memory {
+        const bytes = try allocator.alloc(u8, initial_bytes);
+        @memset(bytes, 0);
+
+        const self = allocator.create(Memory) catch |err| {
+            allocator.free(bytes);
+            return err;
+        };
+        self.* = .{
+            .allocator = allocator,
+            .view = memory_module.LinearMemory.init(bytes),
+            .max_pages = max_pages,
+        };
+        return self;
+    }
+
+    pub fn destroy(self: *Memory) void {
+        const allocator = self.allocator;
+        allocator.free(self.view.bytes);
+        allocator.destroy(self);
+    }
+};
+
 /// Where a function import's calls go: a WASI host function, or a function
 /// exported by another instance (core-module linking).
 pub const ImportBinding = union(enum) {
@@ -43,8 +79,9 @@ pub const NamedInstance = struct {
 pub const Instance = struct {
     allocator: std.mem.Allocator,
     module: *const module.Module,
-    memory_bytes: []u8,
-    memory: memory_module.LinearMemory,
+    /// Owned when this module defines its memory, borrowed when it imports one.
+    memory_ref: *Memory,
+    owns_memory: bool,
     import_resolver: ?*imports.Resolver = null,
     imported_functions: []ImportBinding = &.{},
     globals: []RuntimeGlobal = &.{},
@@ -60,17 +97,31 @@ pub const Instance = struct {
         parsed_module: *const module.Module,
         initial_memory_bytes: usize,
     ) !Instance {
-        const memory_bytes = try allocator.alloc(
-            u8,
-            @max(initial_memory_bytes, try minimumMemoryBytes(parsed_module)),
-        );
-        @memset(memory_bytes, 0);
+        return initWithMemory(allocator, parsed_module, initial_memory_bytes, null);
+    }
+
+    /// Instantiate against a memory another instance exports. `imported` must be
+    /// present exactly when the module imports its memory; `resolveImportedMemory`
+    /// finds it and reports the link failures before anything is instantiated.
+    pub fn initWithMemory(
+        allocator: std.mem.Allocator,
+        parsed_module: *const module.Module,
+        initial_memory_bytes: usize,
+        imported: ?*Memory,
+    ) !Instance {
+        if ((importedMemory(parsed_module) != null) != (imported != null)) {
+            return error.MemoryImportMismatch;
+        }
 
         var result = Instance{
             .allocator = allocator,
             .module = parsed_module,
-            .memory_bytes = memory_bytes,
-            .memory = memory_module.LinearMemory.init(memory_bytes),
+            .memory_ref = imported orelse try Memory.create(
+                allocator,
+                @max(initial_memory_bytes, try minimumMemoryBytes(parsed_module)),
+                declaredMaxPages(parsed_module),
+            ),
+            .owns_memory = imported == null,
         };
         errdefer result.deinit();
 
@@ -79,6 +130,12 @@ pub const Instance = struct {
         try result.applyDataSegments();
 
         return result;
+    }
+
+    /// The linear memory this instance reads and writes, shared with the
+    /// instance that exports it when the module imports its memory.
+    pub fn memory(self: *const Instance) *memory_module.LinearMemory {
+        return &self.memory_ref.view;
     }
 
     pub fn deinit(self: *Instance) void {
@@ -102,7 +159,9 @@ pub const Instance = struct {
         if (self.dropped_data_segments.len != 0) {
             self.allocator.free(self.dropped_data_segments);
         }
-        self.allocator.free(self.memory_bytes);
+        if (self.owns_memory) {
+            self.memory_ref.destroy();
+        }
         self.* = undefined;
     }
 
@@ -132,7 +191,8 @@ pub const Instance = struct {
 
     /// Bind every function import to an export of an earlier instance whose name
     /// matches the import module. Nothing is granted from the host, and only
-    /// function imports are supported.
+    /// function and memory imports are supported; the memory is bound earlier,
+    /// by `resolveImportedMemory`, because data segments need it.
     pub fn bindLinkedImports(self: *Instance, providers: []const NamedInstance) !void {
         if (self.imported_functions.len != 0) {
             self.allocator.free(self.imported_functions);
@@ -144,6 +204,8 @@ pub const Instance = struct {
 
         var index: usize = 0;
         for (self.module.imports.items) |import| {
+            // The memory import, if any, was bound before instantiation.
+            if (import.kind == .memory) continue;
             if (import.kind != .function) return error.UnsupportedLinkedImportKind;
 
             const provider = for (providers) |candidate| {
@@ -412,10 +474,10 @@ pub const Instance = struct {
     }
 
     pub fn currentMemoryPages(self: *const Instance) !u32 {
-        if (self.module.memories.items.len != 1) return error.MemoryUnsupported;
-        if (self.memory_bytes.len % wasm_page_size != 0) return error.InvalidMemorySize;
+        if (memoryCount(self.module) != 1) return error.MemoryUnsupported;
+        if (self.memory().bytes.len % wasm_page_size != 0) return error.InvalidMemorySize;
 
-        const pages = self.memory_bytes.len / wasm_page_size;
+        const pages = self.memory().bytes.len / wasm_page_size;
         return std.math.cast(u32, pages) orelse error.MemorySizeTooLarge;
     }
 
@@ -431,13 +493,14 @@ pub const Instance = struct {
         if (self.max_memory_bytes) |limit| {
             if (new_len > limit) return null;
         }
-        const old_len = self.memory_bytes.len;
-        const grown = self.allocator.realloc(self.memory_bytes, new_len) catch return null;
+        const old_len = self.memory().bytes.len;
+        // The owning allocator grows the shared buffer, so every holder of the
+        // memory sees the new pages through the same view.
+        const grown = self.memory_ref.allocator.realloc(self.memory().bytes, new_len) catch return null;
 
         @memset(grown[old_len..], 0);
 
-        self.memory_bytes = grown;
-        self.memory = memory_module.LinearMemory.init(self.memory_bytes);
+        self.memory_ref.view = memory_module.LinearMemory.init(grown);
 
         return old_pages;
     }
@@ -453,10 +516,10 @@ pub const Instance = struct {
         if (try self.dataSegmentDropped(data_index)) return error.DataSegmentDropped;
 
         const source_range = try checkedRange(segment.bytes.len, source, len);
-        const destination_range = try checkedRange(self.memory_bytes.len, destination, len);
+        const destination_range = try checkedRange(self.memory().bytes.len, destination, len);
 
         @memcpy(
-            self.memory_bytes[destination_range.start..destination_range.end],
+            self.memory().bytes[destination_range.start..destination_range.end],
             segment.bytes[source_range.start..source_range.end],
         );
     }
@@ -551,8 +614,8 @@ pub const Instance = struct {
     }
 
     fn memoryMaxPages(self: *const Instance) !u32 {
-        if (self.module.memories.items.len != 1) return error.MemoryUnsupported;
-        return self.module.memories.items[0].limits.max orelse max_wasm_pages;
+        if (memoryCount(self.module) != 1) return error.MemoryUnsupported;
+        return self.memory_ref.max_pages;
     }
 
     fn applyDataSegments(self: *Instance) !void {
@@ -561,7 +624,7 @@ pub const Instance = struct {
         for (self.module.data_segments.items) |segment| {
             if (segment.passive) continue;
             if (segment.memory_index != 0) return error.UnsupportedMemoryIndex;
-            try self.memory.write(segment.offset, segment.bytes);
+            try self.memory().write(segment.offset, segment.bytes);
         }
     }
 
@@ -630,13 +693,62 @@ fn constValueMatchesType(value: module.ConstValue, value_type: module.ValueType)
 
 fn minimumMemoryBytes(parsed_module: *const module.Module) !usize {
     if (parsed_module.memories.items.len == 0) return 0;
-    if (parsed_module.memories.items.len > 1) return error.MultipleMemoriesUnsupported;
+    if (memoryCount(parsed_module) > 1) return error.MultipleMemoriesUnsupported;
 
     const pages = std.math.cast(usize, parsed_module.memories.items[0].limits.min) orelse {
         return error.MemorySizeTooLarge;
     };
 
     return try std.math.mul(usize, pages, wasm_page_size);
+}
+
+/// Defined and imported memories share one index space, so both count.
+pub fn memoryCount(parsed_module: *const module.Module) usize {
+    return parsed_module.memories.items.len +
+        @as(usize, if (importedMemory(parsed_module) == null) 0 else 1);
+}
+
+pub fn importedMemory(parsed_module: *const module.Module) ?module.Import {
+    for (parsed_module.imports.items) |import| {
+        if (import.kind == .memory) return import;
+    }
+    return null;
+}
+
+fn declaredMaxPages(parsed_module: *const module.Module) u32 {
+    if (parsed_module.memories.items.len != 1) return max_wasm_pages;
+    return parsed_module.memories.items[0].limits.max orelse max_wasm_pages;
+}
+
+/// Bind a module's memory import to the memory an earlier instance exports.
+/// Limits match the core Wasm rule: the provider must offer at least the pages
+/// the importer requires, and may not grow past a maximum the importer declares.
+pub fn resolveImportedMemory(
+    parsed_module: *const module.Module,
+    providers: []const NamedInstance,
+) !?*Memory {
+    const import = importedMemory(parsed_module) orelse return null;
+    if (memoryCount(parsed_module) > 1) return error.MultipleMemoriesUnsupported;
+    const limits = import.limits orelse return error.MissingImportLimits;
+
+    const provider = for (providers) |candidate| {
+        if (std.mem.eql(u8, candidate.name, import.module)) break candidate.instance;
+    } else return error.UnresolvedMemoryImport;
+
+    var exported = false;
+    for (provider.module.exports.items) |candidate| {
+        if (candidate.kind == .memory and candidate.index == 0 and
+            std.mem.eql(u8, candidate.name, import.name)) exported = true;
+    }
+    if (!exported) return error.UnresolvedMemoryImport;
+
+    const available = try provider.currentMemoryPages();
+    if (available < limits.min) return error.IncompatibleMemoryLimits;
+    if (limits.max) |ceiling| {
+        if (provider.memory_ref.max_pages > ceiling) return error.IncompatibleMemoryLimits;
+    }
+
+    return provider.memory_ref;
 }
 
 test "instance owns linear memory" {
@@ -648,8 +760,8 @@ test "instance owns linear memory" {
     var instance = try Instance.init(allocator, &parsed, 64 * 1024);
     defer instance.deinit();
 
-    try instance.memory.writeU32(0, 42);
-    try std.testing.expectEqual(@as(u32, 42), try instance.memory.readU32(0));
+    try instance.memory().writeU32(0, 42);
+    try std.testing.expectEqual(@as(u32, 42), try instance.memory().readU32(0));
 }
 
 test "instance applies active data segments" {
@@ -668,8 +780,8 @@ test "instance applies active data segments" {
     var wasm_instance = try Instance.init(allocator, &parsed, 16);
     defer wasm_instance.deinit();
 
-    try std.testing.expectEqualSlices(u8, "abc", try wasm_instance.memory.read(4, 3));
-    try std.testing.expectEqual(@as(usize, wasm_page_size), wasm_instance.memory_bytes.len);
+    try std.testing.expectEqualSlices(u8, "abc", try wasm_instance.memory().read(4, 3));
+    try std.testing.expectEqual(@as(usize, wasm_page_size), wasm_instance.memory().bytes.len);
 }
 
 test "instance leaves passive data for explicit memory init" {
@@ -681,10 +793,10 @@ test "instance leaves passive data for explicit memory init" {
     var wasm_instance = try Instance.init(allocator, &parsed, 64 * 1024);
     defer wasm_instance.deinit();
 
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, try wasm_instance.memory.read(8, 4));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, try wasm_instance.memory().read(8, 4));
 
     try wasm_instance.memoryInit(0, 8, 1, 4);
-    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory.read(8, 4));
+    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory().read(8, 4));
 
     try wasm_instance.dataDrop(0);
     try std.testing.expectError(error.DataSegmentDropped, wasm_instance.memoryInit(0, 16, 0, 1));
@@ -755,6 +867,63 @@ test "instance grows memory within declared maximum" {
     try std.testing.expectEqual(@as(u32, 2), try wasm_instance.currentMemoryPages());
     try std.testing.expectEqual(@as(?u32, null), try wasm_instance.growMemory(2));
     try std.testing.expectEqual(@as(u32, 2), try wasm_instance.currentMemoryPages());
+}
+
+test "an importing instance shares the exporter's memory, including growth" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixtures.zig");
+
+    var provider_module = try module.Module.parse(allocator, fixtures.shared_memory_provider);
+    defer provider_module.deinit(allocator);
+    var consumer_module = try module.Module.parse(allocator, fixtures.shared_memory_consumer);
+    defer consumer_module.deinit(allocator);
+
+    var provider = try Instance.init(allocator, &provider_module, 64 * 1024);
+    defer provider.deinit();
+
+    const shared = (try resolveImportedMemory(&consumer_module, &.{.{ .name = "provider", .instance = &provider }})).?;
+    var consumer = try Instance.initWithMemory(allocator, &consumer_module, 0, shared);
+    defer consumer.deinit();
+
+    // The consumer's data segment was written into the provider's memory.
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, try provider.memory().read(64, 4));
+
+    try consumer.memory().write(8, &.{ 9, 9 });
+    try std.testing.expectEqualSlices(u8, &.{ 9, 9 }, try provider.memory().read(8, 2));
+
+    // Growth reallocates the shared buffer, so both views follow it.
+    try std.testing.expectEqual(@as(?u32, 1), try consumer.growMemory(1));
+    try std.testing.expectEqual(@as(u32, 2), try provider.currentMemoryPages());
+    try std.testing.expectEqual(@as(u32, 2), try consumer.currentMemoryPages());
+    try std.testing.expectEqualSlices(u8, &.{ 9, 9 }, try provider.memory().read(8, 2));
+}
+
+test "an unmatched memory import is a link failure, not an instantiation" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixtures.zig");
+
+    var provider_module = try module.Module.parse(allocator, fixtures.shared_memory_provider);
+    defer provider_module.deinit(allocator);
+    var consumer_module = try module.Module.parse(allocator, fixtures.shared_memory_consumer_two_pages);
+    defer consumer_module.deinit(allocator);
+
+    var provider = try Instance.init(allocator, &provider_module, 64 * 1024);
+    defer provider.deinit();
+    const providers = [_]NamedInstance{.{ .name = "provider", .instance = &provider }};
+
+    try std.testing.expectError(
+        error.IncompatibleMemoryLimits,
+        resolveImportedMemory(&consumer_module, &providers),
+    );
+    try std.testing.expectError(
+        error.UnresolvedMemoryImport,
+        resolveImportedMemory(&consumer_module, &.{}),
+    );
+    // Instantiating a module that imports memory without one is refused.
+    try std.testing.expectError(
+        error.MemoryImportMismatch,
+        Instance.initWithMemory(allocator, &consumer_module, 0, null),
+    );
 }
 
 test "instance initializes and mutates defined globals" {

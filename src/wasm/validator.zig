@@ -72,7 +72,9 @@ const Validator = struct {
                         }
                     }
                 },
-                .memory => return error.ImportedMemoriesUnsupported,
+                // Core-module linking binds an imported memory to the instance
+                // that exports it; the limits are checked there.
+                .memory => try validateLimitRange(import.limits orelse return error.MissingImportLimits),
                 .table => return error.ImportedTablesUnsupported,
                 .global => return error.ImportedGlobalsUnsupported,
             }
@@ -85,7 +87,7 @@ const Validator = struct {
                 .function => _ = try self.functionTypeIndex(exported.index),
                 .memory => {
                     const actual = std.math.cast(usize, exported.index) orelse return error.InvalidMemoryIndex;
-                    if (actual >= self.parsed.memories.items.len) return error.InvalidMemoryIndex;
+                    if (actual >= self.memoryCount()) return error.InvalidMemoryIndex;
                 },
                 .table => {
                     const actual = std.math.cast(usize, exported.index) orelse return error.InvalidTableIndex;
@@ -108,7 +110,7 @@ const Validator = struct {
     }
 
     fn validateLimits(self: *Validator) !void {
-        if (self.parsed.memories.items.len > 1) return error.MultipleMemoriesUnsupported;
+        if (self.memoryCount() > 1) return error.MultipleMemoriesUnsupported;
 
         for (self.parsed.memories.items) |memory| {
             try validateLimitRange(memory.limits);
@@ -143,9 +145,10 @@ const Validator = struct {
             if (segment.passive) continue;
 
             const memory_index = std.math.cast(usize, segment.memory_index) orelse return error.InvalidMemoryIndex;
-            if (memory_index >= self.parsed.memories.items.len) return error.InvalidMemoryIndex;
+            if (memory_index >= self.memoryCount()) return error.InvalidMemoryIndex;
 
-            const min_pages = std.math.cast(usize, self.parsed.memories.items[memory_index].limits.min) orelse {
+            const limits = self.memoryLimits() orelse return error.InvalidMemoryIndex;
+            const min_pages = std.math.cast(usize, limits.min) orelse {
                 return error.MemorySizeTooLarge;
             };
             const min_bytes = try std.math.mul(usize, min_pages, wasm_page_size);
@@ -239,7 +242,27 @@ const Validator = struct {
     }
 
     fn hasMemory(self: *const Validator) bool {
-        return self.parsed.memories.items.len == 1;
+        return self.memoryCount() == 1;
+    }
+
+    /// Defined and imported memories share one index space.
+    fn memoryCount(self: *const Validator) usize {
+        return self.parsed.memories.items.len +
+            @as(usize, if (self.importedMemoryLimits() == null) 0 else 1);
+    }
+
+    /// The single memory's declared limits, however this module obtains it.
+    fn memoryLimits(self: *const Validator) ?module.Limits {
+        if (self.importedMemoryLimits()) |limits| return limits;
+        if (self.parsed.memories.items.len == 1) return self.parsed.memories.items[0].limits;
+        return null;
+    }
+
+    fn importedMemoryLimits(self: *const Validator) ?module.Limits {
+        for (self.parsed.imports.items) |import| {
+            if (import.kind == .memory) return import.limits;
+        }
+        return null;
     }
 
     fn hasTable(self: *const Validator, table_index: u32) bool {

@@ -392,10 +392,12 @@ fn executeLinked(allocator: std.mem.Allocator, modules: []const LoadedModule, re
     for (modules, parsed, initial) |module, *out, *bytes| {
         out.* = rt.parseModule(module.bytes) catch |err| return .{ .unsupported = @errorName(err) };
         for (out.imports.items) |import| {
-            if (import.kind != .function) return .{ .unsupported = "imported memories, tables and globals are not supported by this worker" };
+            // A module may import the memory an earlier module exports; tables
+            // and globals still cross no module boundary in this worker.
+            if (import.kind != .function and import.kind != .memory) return .{ .unsupported = "imported tables and globals are not supported by this worker" };
         }
         if (out.tables.items.len != 0) return .{ .unsupported = "tables are not supported by this worker" };
-        if (out.memories.items.len > 1) return .{ .unsupported = "multiple memories are not supported" };
+        if (runtime.instance.memoryCount(out) > 1) return .{ .unsupported = "multiple memories are not supported" };
         bytes.* = if (out.memories.items.len == 0) 0 else @as(usize, out.memories.items[0].limits.min) * page;
         if (bytes.* > request.limits.memory_bytes) return .{ .unsupported = "minimum memory exceeds requested budget" };
         rt.validateModule(out) catch |err| return .{ .unsupported = @errorName(err) };
@@ -452,7 +454,10 @@ fn observeLinked(
     var fuel_remaining = request.limits.fuel_per_case;
     var fuel_consumed: u64 = 0;
     for (modules, parsed, initial, instances, named, 0..) |module, *module_parsed, initial_bytes, *instance, *name, index| {
-        instance.* = rt.instantiate(module_parsed, initial_bytes) catch |err| return .{ .name = case.name, .outcome = failure(err, .initialization), .fuel_consumed = fuel_consumed };
+        // Resolving an imported memory is part of linking, so a missing or
+        // incompatible memory export is reported before instantiation.
+        const imported_memory = runtime.instance.resolveImportedMemory(module_parsed, named[0..index]) catch |err| return .{ .name = case.name, .outcome = failure(err, .link), .fuel_consumed = fuel_consumed };
+        instance.* = rt.instantiateWithMemory(module_parsed, initial_bytes, imported_memory) catch |err| return .{ .name = case.name, .outcome = failure(err, .initialization), .fuel_consumed = fuel_consumed };
         instance.max_memory_bytes = request.limits.memory_bytes;
         instance.bindLinkedImports(named[0..index]) catch |err| return .{ .name = case.name, .outcome = failure(err, .link), .fuel_consumed = fuel_consumed };
         name.* = .{ .name = module.name, .instance = instance };
@@ -473,7 +478,7 @@ fn observeLinked(
             if (exported.kind == .memory and exported.index == 0 and std.mem.eql(u8, exported.name, memory.input.@"export")) found = true;
         }
         if (!found) return .{ .name = case.name, .outcome = failure(error.UnknownMemoryExport, .input), .fuel_consumed = fuel_consumed };
-        instances[target].memory.write(@intCast(memory.input.offset), memory.input.payload) catch |err| return .{ .name = case.name, .outcome = failure(err, .input), .fuel_consumed = fuel_consumed };
+        instances[target].memory().write(@intCast(memory.input.offset), memory.input.payload) catch |err| return .{ .name = case.name, .outcome = failure(err, .input), .fuel_consumed = fuel_consumed };
     }
 
     var interpreter = Interpreter.init(&instances[entry]);
@@ -540,7 +545,7 @@ fn observe(allocator: std.mem.Allocator, parsed: *const runtime.module.Module, i
             if (exported.kind == .memory and exported.index == 0 and std.mem.eql(u8, exported.name, memory.@"export")) found = true;
         }
         if (!found) return .{ .name = case.name, .outcome = failure(error.UnknownMemoryExport, .input), .fuel_consumed = interpreter.fuel_consumed };
-        instance.memory.write(@intCast(memory.offset), memory.payload) catch |err| return .{ .name = case.name, .outcome = failure(err, .input), .fuel_consumed = interpreter.fuel_consumed };
+        instance.memory().write(@intCast(memory.offset), memory.payload) catch |err| return .{ .name = case.name, .outcome = failure(err, .input), .fuel_consumed = interpreter.fuel_consumed };
     }
     var arguments: [16]runtime.interpreter.Value = undefined;
     for (case.arguments, 0..) |arg, index| arguments[index] = .{ .i32 = @bitCast(arg) };
@@ -665,6 +670,42 @@ test "mistyped and missing imports fail at the link stage" {
     const alone = [_]LoadedModule{.{ .name = "consumer", .bytes = runtime.fixtures.linked_consumer }};
     const missing = try executeLinked(arena.allocator(), &alone, linkedTestRequest(&linked_cases, 10_000));
     try std.testing.expectEqualStrings("UnresolvedFunctionImport", missing.observed[0].outcome.failed.diagnostic);
+}
+
+const shared_memory_cases = [_]LinkedCase{
+    .{ .name = "stamped", .arguments = &.{0}, .memory = .{ .module = "provider", .input = .{ .@"export" = "memory", .offset = 0, .payload = &.{ 1, 2, 4, 8 } } } },
+    .{ .name = "consumer-data-segment", .arguments = &.{64} },
+};
+
+test "a consumer reads and writes the memory its provider exports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const modules = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.shared_memory_provider },
+        .{ .name = "consumer", .bytes = runtime.fixtures.shared_memory_consumer },
+    };
+    const result = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&shared_memory_cases, 10_000));
+    // The consumer stamps the first byte, so the provider sees 2, 2, 4, 8.
+    try std.testing.expectEqual(@as(i32, 16), result.observed[0].outcome.returned[0]);
+    // Nothing was written for this case: the bytes are the consumer's own data
+    // segment, which only a shared memory could have carried to the provider.
+    try std.testing.expectEqual(@as(i32, 11), result.observed[1].outcome.returned[0]);
+}
+
+test "an incompatible memory import fails at the link stage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const modules = [_]LoadedModule{
+        .{ .name = "provider", .bytes = runtime.fixtures.shared_memory_provider },
+        .{ .name = "consumer", .bytes = runtime.fixtures.shared_memory_consumer_two_pages },
+    };
+    const result = try executeLinked(arena.allocator(), &modules, linkedTestRequest(&shared_memory_cases, 10_000));
+    try std.testing.expectEqual(Stage.link, result.observed[0].outcome.failed.stage);
+    try std.testing.expectEqualStrings("IncompatibleMemoryLimits", result.observed[0].outcome.failed.diagnostic);
+
+    const alone = [_]LoadedModule{.{ .name = "consumer", .bytes = runtime.fixtures.shared_memory_consumer }};
+    const missing = try executeLinked(arena.allocator(), &alone, linkedTestRequest(&shared_memory_cases, 10_000));
+    try std.testing.expectEqualStrings("UnresolvedMemoryImport", missing.observed[0].outcome.failed.diagnostic);
 }
 
 test "fuel is shared across linked modules" {

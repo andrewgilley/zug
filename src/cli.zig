@@ -124,7 +124,7 @@ fn runModule(allocator: std.mem.Allocator, options: Options) !void {
     defer instance.deinit();
 
     const guest_args = [_][]const u8{"zug"};
-    var resolver = wasm_imports.Resolver.initWasiConfig(allocator, &instance.memory, .{
+    var resolver = wasm_imports.Resolver.initWasiConfig(allocator, instance.memory(), .{
         .args = &guest_args,
         .stdin = options.stdin orelse "",
     });

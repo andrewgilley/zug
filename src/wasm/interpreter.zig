@@ -233,7 +233,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const value = try self.instance.memory.readU32(effective_address);
+                    const value = try self.instance.memory().readU32(effective_address);
                     try stack.append(self.instance.allocator, .{ .i32 = value });
                 },
                 0x29 => {
@@ -241,7 +241,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const value = readU64Little(try self.instance.memory.read(effective_address, 8));
+                    const value = readU64Little(try self.instance.memory().read(effective_address, 8));
                     try stack.append(self.instance.allocator, .{ .i64 = value });
                 },
                 0x2a => {
@@ -249,7 +249,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bits = try self.instance.memory.readU32(effective_address);
+                    const bits = try self.instance.memory().readU32(effective_address);
                     try stack.append(self.instance.allocator, .{ .f32 = @bitCast(bits) });
                 },
                 0x2b => {
@@ -257,7 +257,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bits = readU64Little(try self.instance.memory.read(effective_address, 8));
+                    const bits = readU64Little(try self.instance.memory().read(effective_address, 8));
                     try stack.append(self.instance.allocator, .{ .f64 = @bitCast(bits) });
                 },
                 0x2c => {
@@ -265,7 +265,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bytes = try self.instance.memory.read(effective_address, 1);
+                    const bytes = try self.instance.memory().read(effective_address, 1);
                     const signed: i8 = @bitCast(bytes[0]);
                     const widened: i32 = signed;
                     try stack.append(self.instance.allocator, .{ .i32 = @bitCast(widened) });
@@ -275,7 +275,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bytes = try self.instance.memory.read(effective_address, 1);
+                    const bytes = try self.instance.memory().read(effective_address, 1);
                     try stack.append(self.instance.allocator, .{ .i32 = bytes[0] });
                 },
                 0x2e => {
@@ -283,7 +283,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const signed: i16 = @bitCast(readU16Little(try self.instance.memory.read(effective_address, 2)));
+                    const signed: i16 = @bitCast(readU16Little(try self.instance.memory().read(effective_address, 2)));
                     const widened: i32 = signed;
                     try stack.append(self.instance.allocator, .{ .i32 = @bitCast(widened) });
                 },
@@ -293,7 +293,7 @@ pub const Interpreter = struct {
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
                     try stack.append(self.instance.allocator, .{
-                        .i32 = @as(u32, readU16Little(try self.instance.memory.read(effective_address, 2))),
+                        .i32 = @as(u32, readU16Little(try self.instance.memory().read(effective_address, 2))),
                     });
                 },
                 0x30 => {
@@ -301,7 +301,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bytes = try self.instance.memory.read(effective_address, 1);
+                    const bytes = try self.instance.memory().read(effective_address, 1);
                     const signed: i8 = @bitCast(bytes[0]);
                     const widened: i64 = signed;
                     try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
@@ -311,7 +311,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const bytes = try self.instance.memory.read(effective_address, 1);
+                    const bytes = try self.instance.memory().read(effective_address, 1);
                     try stack.append(self.instance.allocator, .{ .i64 = bytes[0] });
                 },
                 0x32 => {
@@ -319,7 +319,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const signed: i16 = @bitCast(readU16Little(try self.instance.memory.read(effective_address, 2)));
+                    const signed: i16 = @bitCast(readU16Little(try self.instance.memory().read(effective_address, 2)));
                     const widened: i64 = signed;
                     try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
                 },
@@ -329,7 +329,7 @@ pub const Interpreter = struct {
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
                     try stack.append(self.instance.allocator, .{
-                        .i64 = @as(u64, readU16Little(try self.instance.memory.read(effective_address, 2))),
+                        .i64 = @as(u64, readU16Little(try self.instance.memory().read(effective_address, 2))),
                     });
                 },
                 0x34 => {
@@ -337,7 +337,7 @@ pub const Interpreter = struct {
                     const offset = try reader.readVarU32();
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    const signed: i32 = @bitCast(try self.instance.memory.readU32(effective_address));
+                    const signed: i32 = @bitCast(try self.instance.memory().readU32(effective_address));
                     const widened: i64 = signed;
                     try stack.append(self.instance.allocator, .{ .i64 = @bitCast(widened) });
                 },
@@ -347,7 +347,7 @@ pub const Interpreter = struct {
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
                     try stack.append(self.instance.allocator, .{
-                        .i64 = @as(u64, try self.instance.memory.readU32(effective_address)),
+                        .i64 = @as(u64, try self.instance.memory().readU32(effective_address)),
                     });
                 },
                 0x36 => {
@@ -356,7 +356,7 @@ pub const Interpreter = struct {
                     const value = try valueAsI32(try popValue(stack));
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    try self.instance.memory.writeU32(effective_address, value);
+                    try self.instance.memory().writeU32(effective_address, value);
                 },
                 0x37 => {
                     _ = try reader.readVarU32();
@@ -366,7 +366,7 @@ pub const Interpreter = struct {
                     const effective_address = try std.math.add(u32, address, offset);
                     var bytes: [8]u8 = undefined;
                     writeU64Little(&bytes, value);
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x38 => {
                     _ = try reader.readVarU32();
@@ -374,7 +374,7 @@ pub const Interpreter = struct {
                     const value = try valueAsF32(try popValue(stack));
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    try self.instance.memory.writeU32(effective_address, @bitCast(value));
+                    try self.instance.memory().writeU32(effective_address, @bitCast(value));
                 },
                 0x39 => {
                     _ = try reader.readVarU32();
@@ -384,7 +384,7 @@ pub const Interpreter = struct {
                     const effective_address = try std.math.add(u32, address, offset);
                     var bytes: [8]u8 = undefined;
                     writeU64Little(&bytes, @bitCast(value));
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x3a => {
                     _ = try reader.readVarU32();
@@ -393,7 +393,7 @@ pub const Interpreter = struct {
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
                     const bytes = [_]u8{std.math.cast(u8, value & 0xff) orelse unreachable};
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x3b => {
                     _ = try reader.readVarU32();
@@ -403,7 +403,7 @@ pub const Interpreter = struct {
                     const effective_address = try std.math.add(u32, address, offset);
                     var bytes: [2]u8 = undefined;
                     writeU16Little(&bytes, @intCast(value & 0xffff));
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x3c => {
                     _ = try reader.readVarU32();
@@ -412,7 +412,7 @@ pub const Interpreter = struct {
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
                     const bytes = [_]u8{std.math.cast(u8, value & 0xff) orelse unreachable};
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x3d => {
                     _ = try reader.readVarU32();
@@ -422,7 +422,7 @@ pub const Interpreter = struct {
                     const effective_address = try std.math.add(u32, address, offset);
                     var bytes: [2]u8 = undefined;
                     writeU16Little(&bytes, @intCast(value & 0xffff));
-                    try self.instance.memory.write(effective_address, &bytes);
+                    try self.instance.memory().write(effective_address, &bytes);
                 },
                 0x3e => {
                     _ = try reader.readVarU32();
@@ -430,7 +430,7 @@ pub const Interpreter = struct {
                     const value = try valueAsI64(try popValue(stack));
                     const address = try valueAsI32(try popValue(stack));
                     const effective_address = try std.math.add(u32, address, offset);
-                    try self.instance.memory.writeU32(effective_address, @intCast(value & 0xffffffff));
+                    try self.instance.memory().writeU32(effective_address, @intCast(value & 0xffffffff));
                 },
                 0x3f => {
                     const memory_index = try reader.readByte();
@@ -1039,7 +1039,7 @@ pub const Interpreter = struct {
                 const offset = try reader.readVarU32();
                 const address = try valueAsI32(try popValue(stack));
                 const effective_address = try std.math.add(u32, address, offset);
-                const bytes = try self.instance.memory.read(effective_address, 16);
+                const bytes = try self.instance.memory().read(effective_address, 16);
                 var value: [16]u8 = undefined;
                 @memcpy(value[0..], bytes);
                 try stack.append(self.instance.allocator, .{ .v128 = value });
@@ -1050,7 +1050,7 @@ pub const Interpreter = struct {
                 const value = try valueAsV128(try popValue(stack));
                 const address = try valueAsI32(try popValue(stack));
                 const effective_address = try std.math.add(u32, address, offset);
-                try self.instance.memory.write(effective_address, value[0..]);
+                try self.instance.memory().write(effective_address, value[0..]);
             },
             0x0c => {
                 var value: [16]u8 = undefined;
@@ -1102,21 +1102,21 @@ pub const Interpreter = struct {
 
         if (len == 0) return;
 
-        const source_range = try checkedMemoryRange(self.instance.memory_bytes.len, source, len);
-        const destination_range = try checkedMemoryRange(self.instance.memory_bytes.len, destination, len);
+        const source_range = try checkedMemoryRange(self.instance.memory().bytes.len, source, len);
+        const destination_range = try checkedMemoryRange(self.instance.memory().bytes.len, destination, len);
 
         if (destination_range.start <= source_range.start) {
             var index: usize = 0;
             while (index < source_range.len) : (index += 1) {
-                self.instance.memory_bytes[destination_range.start + index] =
-                    self.instance.memory_bytes[source_range.start + index];
+                self.instance.memory().bytes[destination_range.start + index] =
+                    self.instance.memory().bytes[source_range.start + index];
             }
         } else {
             var index = source_range.len;
             while (index > 0) {
                 index -= 1;
-                self.instance.memory_bytes[destination_range.start + index] =
-                    self.instance.memory_bytes[source_range.start + index];
+                self.instance.memory().bytes[destination_range.start + index] =
+                    self.instance.memory().bytes[source_range.start + index];
             }
         }
     }
@@ -1230,8 +1230,8 @@ pub const Interpreter = struct {
         const value = try valueAsI32(try popValue(stack));
         const destination = try valueAsI32(try popValue(stack));
 
-        const range = try checkedMemoryRange(self.instance.memory_bytes.len, destination, len);
-        @memset(self.instance.memory_bytes[range.start..range.end], std.math.cast(u8, value & 0xff) orelse unreachable);
+        const range = try checkedMemoryRange(self.instance.memory().bytes.len, destination, len);
+        @memset(self.instance.memory().bytes[range.start..range.end], std.math.cast(u8, value & 0xff) orelse unreachable);
     }
 
     fn executeBlock(
@@ -2308,8 +2308,8 @@ test "interpreter executes integer memory ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 2), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u64, 28), readU64Little(try wasm_instance.memory.read(40, 8)));
-    try std.testing.expectEqual(@as(u8, 255), (try wasm_instance.memory.read(48, 1))[0]);
+    try std.testing.expectEqual(@as(u64, 28), readU64Little(try wasm_instance.memory().read(40, 8)));
+    try std.testing.expectEqual(@as(u8, 255), (try wasm_instance.memory().read(48, 1))[0]);
 }
 
 test "interpreter decodes signed i32 constants" {
@@ -2430,7 +2430,7 @@ test "interpreter executes i32 16-bit memory ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 2), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u16, 0xff80), readU16Little(try wasm_instance.memory.read(128, 2)));
+    try std.testing.expectEqual(@as(u16, 0xff80), readU16Little(try wasm_instance.memory().read(128, 2)));
 }
 
 test "interpreter executes select and branch table" {
@@ -2491,8 +2491,8 @@ test "interpreter executes prefixed numeric and memory ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 6), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(8, 1))[0]);
-    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory.read(11, 1))[0]);
+    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory().read(8, 1))[0]);
+    try std.testing.expectEqual(@as(u8, 7), (try wasm_instance.memory().read(11, 1))[0]);
 }
 
 test "interpreter executes passive data memory init and drop" {
@@ -2508,7 +2508,7 @@ test "interpreter executes passive data memory init and drop" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 0x4d534157), try valueAsI32(result));
-    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory.read(8, 4));
+    try std.testing.expectEqualSlices(u8, "WASM", try wasm_instance.memory().read(8, 4));
     try std.testing.expectError(error.DataSegmentDropped, wasm_instance.memoryInit(0, 16, 0, 1));
 }
 
@@ -2559,10 +2559,10 @@ test "interpreter executes initial simd i32x4 ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 11), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u32, 8), try wasm_instance.memory.readU32(0));
-    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory.readU32(4));
-    try std.testing.expectEqual(@as(u32, 10), try wasm_instance.memory.readU32(8));
-    try std.testing.expectEqual(@as(u32, 11), try wasm_instance.memory.readU32(12));
+    try std.testing.expectEqual(@as(u32, 8), try wasm_instance.memory().readU32(0));
+    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory().readU32(4));
+    try std.testing.expectEqual(@as(u32, 10), try wasm_instance.memory().readU32(8));
+    try std.testing.expectEqual(@as(u32, 11), try wasm_instance.memory().readU32(12));
 }
 
 test "interpreter executes extended i64 memory ops" {
@@ -2578,8 +2578,8 @@ test "interpreter executes extended i64 memory ops" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 2), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u8, 254), (try wasm_instance.memory.read(0, 1))[0]);
-    try std.testing.expectEqual(@as(u32, 255), try wasm_instance.memory.readU32(8));
+    try std.testing.expectEqual(@as(u8, 254), (try wasm_instance.memory().read(0, 1))[0]);
+    try std.testing.expectEqual(@as(u32, 255), try wasm_instance.memory().readU32(8));
 }
 
 test "interpreter executes globals and start function" {
@@ -2632,7 +2632,7 @@ test "interpreter routes wasi fd_write import" {
     var wasm_instance = try instance.Instance.init(allocator, &parsed, 64 * 1024);
     defer wasm_instance.deinit();
 
-    var resolver = imports.Resolver.initWasi(allocator, &wasm_instance.memory);
+    var resolver = imports.Resolver.initWasi(allocator, wasm_instance.memory());
     defer resolver.deinit();
     try wasm_instance.bindImports(&resolver);
 
@@ -2640,7 +2640,7 @@ test "interpreter routes wasi fd_write import" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 0), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u32, 5), try wasm_instance.memory.readU32(16));
+    try std.testing.expectEqual(@as(u32, 5), try wasm_instance.memory().readU32(16));
     try std.testing.expectEqualStrings("hello", resolver.stdout.items);
 }
 
@@ -2655,7 +2655,7 @@ test "interpreter routes wasi system imports" {
 
     const args = [_][]const u8{ "zug", "host" };
     const environ = [_][]const u8{"ZUG=1"};
-    var resolver = imports.Resolver.initWasiConfig(allocator, &wasm_instance.memory, .{
+    var resolver = imports.Resolver.initWasiConfig(allocator, wasm_instance.memory(), .{
         .args = &args,
         .environ = &environ,
     });
@@ -2666,12 +2666,12 @@ test "interpreter routes wasi system imports" {
     const result = (try interpreter.callExport("run", &.{})) orelse return error.MissingReturnValue;
 
     try std.testing.expectEqual(@as(u32, 5), try valueAsI32(result));
-    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.memory.readU32(0));
-    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory.readU32(4));
-    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.memory.readU32(8));
-    try std.testing.expectEqual(@as(u32, 6), try wasm_instance.memory.readU32(16));
-    try std.testing.expectEqual(@as(u8, 2), (try wasm_instance.memory.read(40, 1))[0]);
-    try std.testing.expect(readU64Little(try wasm_instance.memory.read(64, 8)) != 0);
+    try std.testing.expectEqual(@as(u32, 2), try wasm_instance.memory().readU32(0));
+    try std.testing.expectEqual(@as(u32, 9), try wasm_instance.memory().readU32(4));
+    try std.testing.expectEqual(@as(u32, 1), try wasm_instance.memory().readU32(8));
+    try std.testing.expectEqual(@as(u32, 6), try wasm_instance.memory().readU32(16));
+    try std.testing.expectEqual(@as(u8, 2), (try wasm_instance.memory().read(40, 1))[0]);
+    try std.testing.expect(readU64Little(try wasm_instance.memory().read(64, 8)) != 0);
 }
 
 fn readU64Little(bytes: []const u8) u64 {
