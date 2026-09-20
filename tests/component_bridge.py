@@ -75,9 +75,54 @@ def component(code=SUM, *, export="checksum", core_export="checksum",
     return binary
 
 
+# checksum(ptr, len) over a list the caller placed in the component's memory.
+CHECKSUM_LOOP = bytes.fromhex(
+    "01027f"          # two i32 locals: the running sum and the index
+    "0240"            # block
+    "0340"            # loop
+    "2003" "2001" "4f" "0d01"      # if index >= length, leave the block
+    "2002" "2000" "2003" "6a" "2d0000" "6a" "2102"  # sum += memory[ptr + index]
+    "2003" "4101" "6a" "2103"      # index += 1
+    "0c00" "0b" "0b"  # repeat, end loop, end block
+    "2002" "0b")      # return the sum
+BUMP = bytes.fromhex("0041100b")      # cabi_realloc: always the same free space
+HOSTILE = bytes.fromhex("00417f0b")   # cabi_realloc: a pointer outside memory
+
+
+def list_core_module(realloc=BUMP):
+    """A core module whose memory and allocator the canonical ABI can use."""
+    types = b"\x02" + b"\x60\x02\x7f\x7f\x01\x7f" + b"\x60\x04" + b"\x7f" * 4 + b"\x01\x7f"
+    binary = b"\0asm\x01\0\0\0" + section(1, types)
+    binary += section(3, b"\x02\x00\x01")
+    binary += section(5, b"\x01\x00\x01")
+    binary += section(7, b"\x03" + name("memory") + b"\x02\x00"
+                      + name("cabi_realloc") + b"\x00\x01"
+                      + name("checksum") + b"\x00\x00")
+    bodies = [CHECKSUM_LOOP, realloc]
+    binary += section(10, leb(len(bodies)) + b"".join(leb(len(b)) + b for b in bodies))
+    return binary
+
+
+def list_component(realloc=BUMP, *, options=b"\x02\x03\x00\x04\x00"):
+    """A component lifting checksum(list<u8>) -> u32 through its own memory."""
+    binary = b"\0asm\x0d\0\x01\0"
+    binary += section(1, list_core_module(realloc))
+    binary += section(2, b"\x01\x00\x00\x00")
+    aliases = (b"\x00\x02\x01\x00" + name("memory")
+               + b"\x00\x00\x01\x00" + name("cabi_realloc")
+               + b"\x00\x00\x01\x00" + name("checksum"))
+    binary += section(6, b"\x03" + aliases)
+    binary += section(7, b"\x02" + b"\x70\x7d"
+                      + b"\x40\x01" + name("bytes") + b"\x00\x00\x79")
+    binary += section(8, b"\x01\x00\x00\x01" + options + b"\x01")
+    binary += section(11, b"\x01\x00" + name("checksum") + b"\x01\x00\x00")
+    return binary
+
+
 class ComponentBridgeTests(unittest.TestCase):
     def execute(self, binary=None, *, export="checksum", cases=None, fuel=10000,
-                memory=65536, digest=None, change=None):
+                memory=65536, digest=None, change=None,
+                profile="fixed-list-u8-u32/1"):
         if binary is None:
             binary = component()
         with tempfile.TemporaryDirectory() as temporary:
@@ -90,7 +135,7 @@ class ComponentBridgeTests(unittest.TestCase):
                 "component_path": str(path),
                 "component_digest": digest or "sha256:" + hashlib.sha256(binary).hexdigest(),
                 "request": {
-                    "profile": "fixed-list-u8-u32/1", "export": export,
+                    "profile": profile, "export": export,
                     "cases": cases if cases is not None else [self.case("sum", [0, 255, 128, 127])],
                     "limits": {"fuel_per_case": fuel, "memory_bytes": memory},
                     "host_grants": [],
@@ -106,6 +151,10 @@ class ComponentBridgeTests(unittest.TestCase):
     @staticmethod
     def case(label, value):
         return {"name": label, "arguments": [{"type": "list<u8,4>", "value": value}]}
+
+    @staticmethod
+    def list_case(label, value):
+        return {"name": label, "arguments": [{"type": "list<u8>", "value": value}]}
 
     def response(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -134,6 +183,50 @@ class ComponentBridgeTests(unittest.TestCase):
         execution = self.response(result)["execution"]
         self.assertEqual(execution["kind"], "unsupported", execution)
         self.assertTrue(execution["reason"])
+
+    def test_list_capability_is_advertised(self):
+        result = subprocess.run([str(WORKER), "describe"], capture_output=True, text=True, check=True)
+        self.assertTrue(json.loads(result.stdout)["capabilities"]["component_list"])
+
+    def test_list_of_unknown_length_travels_through_component_memory(self):
+        cases = [self.list_case("single", [7]),
+                 self.list_case("longer-than-flattened", list(range(1, 11))),
+                 self.list_case("high-bytes", [255] * 8)]
+        observations = self.observations(
+            self.execute(list_component(), cases=cases, profile="list-u8-u32/1"))
+        self.assertEqual([case["outcome"]["values"] for case in observations],
+                         [[{"type": "u32", "value": 7}],
+                          [{"type": "u32", "value": 55}],
+                          [{"type": "u32", "value": 2040}]])
+
+    def test_requested_profile_must_be_the_component_shape(self):
+        # Neither direction is a behavioral answer: the request does not fit.
+        self.unsupported(self.execute(list_component(),
+                                      cases=[self.case("sum", [1, 2, 3, 4])]))
+        self.unsupported(self.execute(REFERENCE, profile="list-u8-u32/1",
+                                      cases=[self.list_case("sum", [1, 2, 3, 4])]))
+
+    def test_the_components_own_allocator_decides_where_bytes_go(self):
+        # A pointer outside memory fails that case; the host never writes blind.
+        case = self.list_case("refused", [1, 2, 3])
+        observation = self.observations(
+            self.execute(list_component(HOSTILE), cases=[case], profile="list-u8-u32/1"))[0]
+        self.assertEqual(observation["outcome"]["kind"], "failed", observation)
+        self.assertEqual(observation["outcome"]["stage"], "invocation")
+
+        # A lift that declares no memory cannot carry a list at all.
+        self.unsupported(self.execute(list_component(options=b"\x01\x04\x00"),
+                                      cases=[case], profile="list-u8-u32/1"))
+
+    def test_list_arguments_are_bounded_and_typed(self):
+        for value in [[], [0] * 257, [0, 0, -1], "abcd"]:
+            with self.subTest(value=value):
+                self.rejected(self.execute(list_component(), profile="list-u8-u32/1",
+                                           cases=[self.list_case("invalid", value)]))
+        # The type string belongs to the profile, in both directions.
+        self.rejected(self.execute(list_component(), profile="list-u8-u32/1",
+                                   cases=[self.case("mistyped", [1, 2, 3, 4])]))
+        self.rejected(self.execute(cases=[self.list_case("mistyped", [1, 2, 3, 4])]))
 
     def test_component_capability_is_advertised(self):
         result = subprocess.run([str(WORKER), "describe"], capture_output=True, text=True, check=True)

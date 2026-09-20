@@ -75,18 +75,21 @@ const LinkedCase = struct { name: []const u8, arguments: []const i32, memory: ?L
 const LinkedRequest = struct { entry: Entry, result_count: usize, cases: []const LinkedCase, limits: Limits };
 const LinkedEnvelope = struct { schema_version: u32, protocol: []const u8, modules: []const ModuleRef, request: LinkedRequest };
 const LoadedModule = struct { name: []const u8, bytes: []const u8 };
+const max_list_bytes = 256;
+
 const ComponentArgument = struct {
     type: []const u8,
-    value: [4]u8,
+    value: []const u8,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
         const value = try std.json.innerParse(std.json.Value, allocator, source, options);
         if (value != .object or value.object.count() != 2) return error.UnexpectedToken;
         const type_name = value.object.get("type") orelse return error.MissingField;
         const bytes = value.object.get("value") orelse return error.MissingField;
-        if (type_name != .string or bytes != .array or bytes.array.items.len != 4) return error.UnexpectedToken;
-        var result: [4]u8 = undefined;
-        for (bytes.array.items, &result) |byte, *item| {
+        if (type_name != .string or bytes != .array) return error.UnexpectedToken;
+        if (bytes.array.items.len == 0 or bytes.array.items.len > max_list_bytes) return error.UnexpectedToken;
+        const result = try allocator.alloc(u8, bytes.array.items.len);
+        for (bytes.array.items, result) |byte, *item| {
             if (byte != .integer) return error.UnexpectedToken;
             item.* = std.math.cast(u8, byte.integer) orelse return error.UnexpectedToken;
         }
@@ -179,7 +182,7 @@ fn run(init: std.process.Init.Minimal, allocator: std.mem.Allocator) !void {
             .protocol = protocol,
             .backend = "zug",
             .version = "0.0.1",
-            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true, .component_fixed_list = true },
+            .capabilities = .{ .fuel = true, .memory_limit = true, .max_results = 1, .memory_input = true, .memory_bytes = true, .linked_modules = true, .component_fixed_list = true, .component_list = true },
         });
         return;
     }
@@ -236,8 +239,15 @@ fn executeComponentRequest(allocator: std.mem.Allocator, json: []const u8) !void
     try emit(allocator, .{ .schema_version = 1, .protocol = component_protocol, .component_digest = &digest, .execution = execution });
 }
 
+/// Each profile names the canonical shape of the one argument it carries.
+fn argumentType(profile: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, profile, "fixed-list-u8-u32/1")) return "list<u8,4>";
+    if (std.mem.eql(u8, profile, "list-u8-u32/1")) return "list<u8>";
+    return null;
+}
+
 fn validateComponentRequest(request: ComponentRequest) !void {
-    if (!std.mem.eql(u8, request.profile, "fixed-list-u8-u32/1")) return error.UnsupportedComponentProfile;
+    const argument_type = argumentType(request.profile) orelse return error.UnsupportedComponentProfile;
     if (request.host_grants.len != 0) return error.UnsupportedHostGrants;
     if (request.@"export".len == 0 or request.@"export".len > 1024) return error.InvalidExport;
     if (request.cases.len == 0 or request.cases.len > 64) return error.InvalidCaseCount;
@@ -245,7 +255,9 @@ fn validateComponentRequest(request: ComponentRequest) !void {
     if (request.limits.memory_bytes < page or request.limits.memory_bytes > 64 * 1024 * 1024) return error.InvalidMemoryLimit;
     for (request.cases, 0..) |case, index| {
         if (case.name.len == 0 or case.name.len > 128) return error.InvalidCase;
-        if (!std.mem.eql(u8, case.arguments[0].type, "list<u8,4>")) return error.InvalidComponentArgumentType;
+        if (!std.mem.eql(u8, case.arguments[0].type, argument_type)) return error.InvalidComponentArgumentType;
+        if (std.mem.eql(u8, request.profile, "fixed-list-u8-u32/1") and case.arguments[0].value.len != 4)
+            return error.InvalidComponentArgumentLength;
         for (request.cases[0..index]) |prior| {
             if (std.mem.eql(u8, prior.name, case.name)) return error.DuplicateCaseName;
         }
@@ -255,23 +267,31 @@ fn validateComponentRequest(request: ComponentRequest) !void {
 fn executeComponent(allocator: std.mem.Allocator, bytes: []const u8, request: ComponentRequest) !ComponentExecution {
     try validateComponentRequest(request);
     const resolved = component_runtime.resolve(allocator, bytes, request.@"export") catch |err| return .{ .unsupported = @errorName(err) };
+    // The request names the canonical shape it expects; the component's own
+    // declaration decides what it is. A disagreement is not a case failure.
+    const matches = switch (resolved.lowering) {
+        .flattened => std.mem.eql(u8, request.profile, "fixed-list-u8-u32/1"),
+        .memory => std.mem.eql(u8, request.profile, "list-u8-u32/1"),
+    };
+    if (!matches) return .{ .unsupported = "the component's canonical shape is not the requested profile" };
     const rt = runtime.Runtime.init(allocator);
     var parsed = rt.parseModule(resolved.module_bytes) catch |err| return .{ .unsupported = @errorName(err) };
     defer parsed.deinit(allocator);
-    // The supported canonical ABI flattens the value; memory is never used to
-    // invent a pointer convention at the component boundary.
+    // Nothing is granted from the host. A list of unknown length still travels
+    // through the component's own memory, allocated by its own realloc.
     if (parsed.imports.items.len != 0 or parsed.tables.items.len != 0 or parsed.memories.items.len > 1) return .{ .unsupported = "component core imports, tables or multiple memories are outside this profile" };
+    if (resolved.lowering == .memory and parsed.memories.items.len != 1) return .{ .unsupported = "a canonical memory option needs the core module to define one memory" };
     const initial_bytes: usize = if (parsed.memories.items.len == 0) 0 else @as(usize, parsed.memories.items[0].limits.min) * page;
     if (initial_bytes > request.limits.memory_bytes) return .{ .unsupported = "minimum memory exceeds requested budget" };
     rt.validateModule(&parsed) catch |err| return .{ .unsupported = @errorName(err) };
     const observations = try allocator.alloc(ComponentObservation, request.cases.len);
     for (request.cases, observations) |case, *observation| {
-        observation.* = try observeComponent(&parsed, initial_bytes, resolved.core_export, request.limits, case);
+        observation.* = try observeComponent(&parsed, initial_bytes, resolved, request.limits, case);
     }
     return .{ .observed = observations };
 }
 
-fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, core_export: []const u8, limits: Limits, case: ComponentCase) !ComponentObservation {
+fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, resolved: component_runtime.Resolved, limits: Limits, case: ComponentCase) !ComponentObservation {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const rt = runtime.Runtime.init(arena.allocator());
@@ -281,9 +301,35 @@ fn observeComponent(parsed: *const runtime.module.Module, initial_bytes: usize, 
     var interpreter = Interpreter.init(&instance);
     interpreter.fuel_remaining = limits.fuel_per_case;
     interpreter.runStart() catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .initialization), .fuel_consumed = interpreter.fuel_consumed };
+    const bytes = case.arguments[0].value;
     var arguments: [4]runtime.interpreter.Value = undefined;
-    for (case.arguments[0].value, &arguments) |byte, *argument| argument.* = .{ .i32 = byte };
-    const returned = interpreter.callExport(core_export, &arguments) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+    const lowered: []runtime.interpreter.Value = switch (resolved.lowering) {
+        .flattened => |count| blk: {
+            if (bytes.len != count) return error.UnexpectedArgumentLength;
+            for (bytes, arguments[0..count]) |byte, *argument| argument.* = .{ .i32 = byte };
+            break :blk arguments[0..count];
+        },
+        .memory => |allocation| blk: {
+            // Lowering a list: the component's own allocator chooses where the
+            // bytes go, exactly as a caller compiled against it would.
+            const length = std.math.cast(u32, bytes.len) orelse return error.UnexpectedArgumentLength;
+            var request_arguments = [_]runtime.interpreter.Value{
+                .{ .i32 = 0 }, // no previous allocation
+                .{ .i32 = 0 }, // of no size
+                .{ .i32 = 1 }, // u8 alignment
+                .{ .i32 = length },
+            };
+            const address = interpreter.callExport(allocation.realloc_export, &request_arguments) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+            const pointer = address orelse return error.UnexpectedRuntimeResult;
+            // A canonical pointer is a non-negative i32; the write bounds-checks the rest.
+            if (pointer != .i32 or pointer.i32 > std.math.maxInt(i32)) return .{ .name = case.name, .outcome = componentFailure(error.InvalidReallocResult, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+            instance.memory().write(pointer.i32, bytes) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
+            arguments[0] = pointer;
+            arguments[1] = .{ .i32 = length };
+            break :blk arguments[0..2];
+        },
+    };
+    const returned = interpreter.callExport(resolved.core_export, lowered) catch |err| return .{ .name = case.name, .outcome = componentFailure(err, .invocation), .fuel_consumed = interpreter.fuel_consumed };
     const value = returned orelse return error.UnexpectedRuntimeResult;
     if (value != .i32) return error.UnexpectedRuntimeResult;
     // i32 carries the bit pattern of a canonical unsigned u32 result.

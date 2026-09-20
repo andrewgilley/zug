@@ -1,6 +1,7 @@
-//! Executable, deliberately bounded Component Model profile: list<u8, 4> -> u32.
-//! Decode all declarations before allowing any guest code to run. References are
-//! resolved in declaration order in their respective index spaces, not by layout.
+//! Executable, deliberately bounded Component Model profile: list<u8, 4> -> u32
+//! and list<u8> -> u32. Decode all declarations before allowing any guest code
+//! to run. References are resolved in declaration order in their respective
+//! index spaces, not by layout.
 const std = @import("std");
 const module = @import("module.zig");
 const validator = @import("validator.zig");
@@ -19,6 +20,40 @@ const reference_component =
     "\x6d\x65\x01\x0d\x00\x11\x01\x00\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x01\x13\x00\x12\x01\x00\x0e\x69\x6d\x70\x6c\x65\x6d\x65\x6e" ++
     "\x74\x61\x74\x69\x6f\x6e\x01\x18\x03\x02\x00\x05\x62\x79\x74\x65\x73\x01\x0d\x63\x68\x65\x63\x6b\x73\x75\x6d\x2d\x74\x79\x70\x65";
 
+// wat 0.259.0 output from Plexus fixtures/fixed-length-lists/component/checksum-list.wat.
+// Its canon lift declares (memory $memory) and (realloc $realloc).
+const list_component =
+    "\x00\x61\x73\x6d\x0d\x00\x01\x00\x01\x8e\x02\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x0f\x02\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02" ++
+    "\x7f\x7f\x01\x7f\x03\x03\x02\x00\x01\x05\x03\x01\x00\x01\x06\x06\x01\x7f\x01\x41\x08\x0b\x07\x24\x03\x06\x6d\x65\x6d\x6f\x72\x79" ++
+    "\x02\x00\x0c\x63\x61\x62\x69\x5f\x72\x65\x61\x6c\x6c\x6f\x63\x00\x00\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x00\x01\x0a\x4c\x02\x20" ++
+    "\x01\x01\x7f\x23\x00\x20\x02\x41\x01\x6b\x6a\x20\x02\x41\x01\x6b\x41\x7f\x73\x71\x21\x04\x20\x04\x20\x03\x6a\x24\x00\x20\x04\x0b" ++
+    "\x29\x01\x02\x7f\x02\x40\x03\x40\x20\x03\x20\x01\x4f\x0d\x01\x20\x02\x20\x00\x20\x03\x6a\x2d\x00\x00\x6a\x21\x02\x20\x03\x41\x01" ++
+    "\x6a\x21\x03\x0c\x00\x0b\x0b\x20\x02\x0b\x00\x6d\x04\x6e\x61\x6d\x65\x00\x09\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x02\x3c\x02\x00" ++
+    "\x05\x00\x03\x6f\x6c\x64\x01\x08\x6f\x6c\x64\x5f\x73\x69\x7a\x65\x02\x05\x61\x6c\x69\x67\x6e\x03\x04\x73\x69\x7a\x65\x04\x03\x70" ++
+    "\x74\x72\x01\x04\x00\x03\x70\x74\x72\x01\x03\x6c\x65\x6e\x02\x03\x73\x75\x6d\x03\x05\x69\x6e\x64\x65\x78\x03\x14\x01\x01\x02\x00" ++
+    "\x04\x64\x6f\x6e\x65\x01\x09\x6e\x65\x78\x74\x2d\x62\x79\x74\x65\x07\x07\x01\x00\x04\x6e\x65\x78\x74\x02\x04\x01\x00\x00\x00\x06" ++
+    "\x1d\x02\x00\x02\x01\x00\x06\x6d\x65\x6d\x6f\x72\x79\x00\x00\x01\x00\x0c\x63\x61\x62\x69\x5f\x72\x65\x61\x6c\x6c\x6f\x63\x07\x0e" ++
+    "\x02\x70\x7d\x40\x01\x05\x62\x79\x74\x65\x73\x00\x00\x79\x06\x0e\x01\x00\x00\x01\x00\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x08\x0a" ++
+    "\x01\x00\x00\x01\x02\x03\x00\x04\x00\x01\x0b\x0e\x01\x00\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x01\x00\x00\x00\x68\x0e\x63\x6f\x6d" ++
+    "\x70\x6f\x6e\x65\x6e\x74\x2d\x6e\x61\x6d\x65\x01\x0c\x00\x00\x01\x00\x07\x72\x65\x61\x6c\x6c\x6f\x63\x01\x0b\x00\x02\x01\x00\x06" ++
+    "\x6d\x65\x6d\x6f\x72\x79\x01\x0d\x00\x11\x01\x00\x08\x63\x68\x65\x63\x6b\x73\x75\x6d\x01\x13\x00\x12\x01\x00\x0e\x69\x6d\x70\x6c" ++
+    "\x65\x6d\x65\x6e\x74\x61\x74\x69\x6f\x6e\x01\x18\x03\x02\x00\x05\x62\x79\x74\x65\x73\x01\x0d\x63\x68\x65\x63\x6b\x73\x75\x6d\x2d" ++
+    "\x74\x79\x70\x65";
+
+/// How the canonical ABI carries the argument list of the lifted function.
+pub const Lowering = union(enum) {
+    /// A fixed-length list flattens into one i32 core parameter per element.
+    flattened: u32,
+    /// A list of unknown length is written into the component's own memory by
+    /// its own allocator, and passed as the pointer and length pair.
+    memory: Allocation,
+};
+
+pub const Allocation = struct {
+    realloc_export: []const u8,
+    realloc_index: u32,
+};
+
 /// Slices borrow the input component. No allocation survives resolve().
 pub const Resolved = struct {
     module_bytes: []const u8,
@@ -26,16 +61,26 @@ pub const Resolved = struct {
     core_function_index: u32,
     component_function_index: u32,
     component_type_index: u32,
+    lowering: Lowering,
+};
+
+/// Whether a component function takes a fixed-length list or one of any length.
+const Parameter = enum { fixed_bytes, list_bytes };
+
+const Signature = struct {
+    name: []const u8, // Parameter name is part of component function typing.
+    parameter: Parameter,
 };
 
 const Type = union(enum) {
     u8_type,
     u32_type,
     fixed_bytes,
-    function: []const u8, // Parameter name is part of component function typing.
+    list_bytes,
+    function: Signature,
 };
 const CoreFunction = struct { name: []const u8, index: u32 };
-const Function = struct { core: CoreFunction, type_index: u32 };
+const Function = struct { core: CoreFunction, type_index: u32, lowering: Lowering };
 
 pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []const u8) !Resolved {
     if (bytes.len > max_component_bytes) return error.ComponentTooLarge;
@@ -49,6 +94,9 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
     defer types.deinit(allocator);
     var core_functions: std.ArrayList(CoreFunction) = .empty;
     defer core_functions.deinit(allocator);
+    // Aliased core memories, in declaration order: canonical options index them.
+    var core_memories: std.ArrayList(u32) = .empty;
+    defer core_memories.deinit(allocator);
     var functions: std.ArrayList(Function) = .empty;
     defer functions.deinit(allocator);
     var export_names: std.ArrayList([]const u8) = .empty;
@@ -95,13 +143,19 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
             6 => {
                 const count = try section.count();
                 for (0..count) |_| {
-                    // alias core instance export, of the core function sort.
-                    if (try section.byte() != 0 or try section.byte() != 0 or try section.byte() != 1)
-                        return error.UnsupportedComponentAlias;
+                    // alias core instance export, of the core function or memory sort.
+                    if (try section.byte() != 0) return error.UnsupportedComponentAlias;
+                    const sort = try section.byte();
+                    if (sort != 0 and sort != 2) return error.UnsupportedComponentAlias;
+                    if (try section.byte() != 1) return error.UnsupportedComponentAlias;
                     if (try section.u32leb() != 0 or !instantiated) return error.InvalidComponentInstanceIndex;
                     const name = try section.name();
-                    const core = try findCoreFunction(parsed.?, name);
-                    try appendBounded(CoreFunction, allocator, &core_functions, core);
+                    if (sort == 0) {
+                        const core = try findCoreFunction(parsed.?, name);
+                        try appendBounded(CoreFunction, allocator, &core_functions, core);
+                    } else {
+                        try appendBounded(u32, allocator, &core_memories, try findCoreMemory(parsed.?, name));
+                    }
                 }
             },
             7 => {
@@ -115,15 +169,23 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                                 return error.UnsupportedComponentType;
                             break :blk .fixed_bytes;
                         },
+                        0x70 => blk: {
+                            if (try valueType(&section, types.items) != .u8_type)
+                                return error.UnsupportedComponentType;
+                            break :blk .list_bytes;
+                        },
                         0x40 => blk: {
                             if (try section.u32leb() != 1) return error.UnsupportedComponentSignature;
                             const name = try section.name();
                             try simpleName(name);
-                            if (try valueType(&section, types.items) != .fixed_bytes)
-                                return error.UnsupportedComponentSignature;
+                            const parameter: Parameter = switch (try valueType(&section, types.items)) {
+                                .fixed_bytes => .fixed_bytes,
+                                .list_bytes => .list_bytes,
+                                else => return error.UnsupportedComponentSignature,
+                            };
                             if (try section.byte() != 0 or try valueType(&section, types.items) != .u32_type)
                                 return error.UnsupportedComponentSignature;
-                            break :blk .{ .function = name };
+                            break :blk .{ .function = .{ .name = name, .parameter = parameter } };
                         },
                         else => return error.UnsupportedComponentType,
                     };
@@ -136,12 +198,13 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                     if (try section.byte() != 0 or try section.byte() != 0) return error.UnsupportedCanonicalOperation;
                     const core_index = try section.u32leb();
                     if (core_index >= core_functions.items.len) return error.InvalidCanonicalFunctionIndex;
-                    if (try section.u32leb() != 0) return error.UnsupportedCanonicalOptions;
+                    const options = try canonicalOptions(&section, core_functions.items, core_memories.items);
                     const type_index = try section.u32leb();
                     try functionType(types.items, type_index);
                     const core = core_functions.items[core_index];
-                    try checkCoreSignature(parsed.?, core.index);
-                    try appendBounded(Function, allocator, &functions, .{ .core = core, .type_index = type_index });
+                    const lowered = try lowering(types.items[type_index].function.parameter, options, parsed.?);
+                    try checkCoreSignature(parsed.?, core.index, lowered);
+                    try appendBounded(Function, allocator, &functions, .{ .core = core, .type_index = type_index, .lowering = lowered });
                 }
             },
             11 => {
@@ -164,7 +227,9 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                             if (try section.byte() != 1) return error.UnsupportedComponentExportType;
                             const type_index = try section.u32leb();
                             try functionType(types.items, type_index);
-                            if (!std.mem.eql(u8, types.items[type_index].function, types.items[func.type_index].function))
+                            const declared = types.items[type_index].function;
+                            const actual = types.items[func.type_index].function;
+                            if (!std.mem.eql(u8, declared.name, actual.name) or declared.parameter != actual.parameter)
                                 return error.ComponentExportTypeMismatch;
                         },
                         else => return error.InvalidComponentExportType,
@@ -175,6 +240,7 @@ pub fn resolve(allocator: std.mem.Allocator, bytes: []const u8, export_name: []c
                         .core_function_index = func.core.index,
                         .component_function_index = index,
                         .component_type_index = func.type_index,
+                        .lowering = func.lowering,
                     };
                     try appendBounded([]const u8, allocator, &export_names, name);
                     // Component exports introduce another item in the corresponding
@@ -240,6 +306,16 @@ fn simpleName(name: []const u8) !void {
     if (at_start) return error.UnsupportedComponentName;
 }
 
+fn findCoreMemory(parsed: module.Module, name: []const u8) !u32 {
+    for (parsed.exports.items) |exp| {
+        if (std.mem.eql(u8, exp.name, name)) {
+            if (exp.kind != .memory) return error.ComponentAliasKindMismatch;
+            return exp.index;
+        }
+    }
+    return error.MissingCoreExport;
+}
+
 fn findCoreFunction(parsed: module.Module, name: []const u8) !CoreFunction {
     for (parsed.exports.items) |exp| {
         if (std.mem.eql(u8, exp.name, name)) {
@@ -250,11 +326,78 @@ fn findCoreFunction(parsed: module.Module, name: []const u8) !CoreFunction {
     return error.MissingCoreExport;
 }
 
-fn checkCoreSignature(parsed: module.Module, index: u32) !void {
+const Options = struct {
+    memory: ?u32 = null,
+    realloc: ?CoreFunction = null,
+};
+
+/// Canonical options, in the binary encoding. Only what a list of unknown
+/// length needs is accepted: its bytes live in the component's own memory.
+fn canonicalOptions(
+    section: *Reader,
+    core_functions: []const CoreFunction,
+    core_memories: []const u32,
+) !Options {
+    var options = Options{};
+    const count = try section.u32leb();
+    if (count > 2) return error.UnsupportedCanonicalOptions;
+    for (0..count) |_| {
+        switch (try section.byte()) {
+            0x03 => {
+                if (options.memory != null) return error.DuplicateCanonicalOption;
+                const index = try section.u32leb();
+                if (index >= core_memories.len) return error.InvalidCanonicalMemoryIndex;
+                options.memory = core_memories[index];
+            },
+            0x04 => {
+                if (options.realloc != null) return error.DuplicateCanonicalOption;
+                const index = try section.u32leb();
+                if (index >= core_functions.len) return error.InvalidCanonicalFunctionIndex;
+                options.realloc = core_functions[index];
+            },
+            else => return error.UnsupportedCanonicalOptions,
+        }
+    }
+    return options;
+}
+
+/// Match the declared parameter against the options that can carry it.
+fn lowering(parameter: Parameter, options: Options, parsed: module.Module) !Lowering {
+    switch (parameter) {
+        .fixed_bytes => {
+            // Four flattened i32 parameters need no memory and no allocator.
+            if (options.memory != null or options.realloc != null) return error.UnsupportedCanonicalOptions;
+            return .{ .flattened = 4 };
+        },
+        .list_bytes => {
+            const memory = options.memory orelse return error.MissingCanonicalMemory;
+            const realloc = options.realloc orelse return error.MissingCanonicalRealloc;
+            // This profile runs one core instance, whose only memory is index 0.
+            if (memory != 0) return error.UnsupportedCanonicalMemoryIndex;
+            try checkReallocSignature(parsed, realloc.index);
+            return .{ .memory = .{ .realloc_export = realloc.name, .realloc_index = realloc.index } };
+        },
+    }
+}
+
+fn checkCoreSignature(parsed: module.Module, index: u32, lowered: Lowering) !void {
     if (index >= parsed.functions.items.len) return error.InvalidCoreFunctionIndex;
     const typ = try parsed.functionType(parsed.functions.items[index].type_index);
-    if (!std.mem.eql(module.ValueType, typ.params, &.{ .i32, .i32, .i32, .i32 }) or
+    const expected: []const module.ValueType = switch (lowered) {
+        // Element per parameter, against pointer and length.
+        .flattened => &.{ .i32, .i32, .i32, .i32 },
+        .memory => &.{ .i32, .i32 },
+    };
+    if (!std.mem.eql(module.ValueType, typ.params, expected) or
         !std.mem.eql(module.ValueType, typ.results, &.{.i32})) return error.CanonicalSignatureMismatch;
+}
+
+fn checkReallocSignature(parsed: module.Module, index: u32) !void {
+    if (index >= parsed.functions.items.len) return error.InvalidCoreFunctionIndex;
+    const typ = try parsed.functionType(parsed.functions.items[index].type_index);
+    // (original, original size, alignment, new size) -> pointer
+    if (!std.mem.eql(module.ValueType, typ.params, &.{ .i32, .i32, .i32, .i32 }) or
+        !std.mem.eql(module.ValueType, typ.results, &.{.i32})) return error.ReallocSignatureMismatch;
 }
 
 fn uniqueCoreExports(parsed: module.Module) !void {
@@ -462,4 +605,32 @@ test "core structural preflight rejects duplicate sections oversized locals and 
     try std.testing.expectError(error.ComponentTooComplex, preflightCore(header ++ "\x0a\x08\x01\x06\x01\xff\xff\x7f\x7f\x0b"));
     try std.testing.expectError(error.TrailingCoreSectionBytes, preflightCore(header ++ "\x0a\x02\x00\x00"));
     try std.testing.expectError(error.ComponentImportsForbidden, preflightCore(header ++ "\x02\x01\x01"));
+}
+
+test "a list of unknown length resolves to the component's own memory and allocator" {
+    const resolved = try resolve(std.testing.allocator, list_component, "checksum");
+    try std.testing.expectEqualStrings("checksum", resolved.core_export);
+    try std.testing.expectEqualStrings("cabi_realloc", resolved.lowering.memory.realloc_export);
+    // The fixed-length shape stays flattened, with no memory and no allocator.
+    const flattened = try resolve(std.testing.allocator, reference_component, "checksum");
+    try std.testing.expectEqual(@as(u32, 4), flattened.lowering.flattened);
+}
+
+test "a lifted list needs both canonical options, and the core signature they imply" {
+    // The canonical section holds: count, 0x00 0x00, core index, options, type.
+    var changed = list_component.*;
+    changed[358] = 1; // memory option index, with one aliased memory
+    try std.testing.expectError(error.InvalidCanonicalMemoryIndex, resolve(std.testing.allocator, &changed, "checksum"));
+    changed = list_component.*;
+    changed[357] = 4; // a second realloc option in place of the memory
+    try std.testing.expectError(error.DuplicateCanonicalOption, resolve(std.testing.allocator, &changed, "checksum"));
+    changed = list_component.*;
+    changed[355] = 0; // lift the allocator itself, whose core signature differs
+    try std.testing.expectError(error.CanonicalSignatureMismatch, resolve(std.testing.allocator, &changed, "checksum"));
+
+    // The same lift with the allocator alone: a list has nowhere to live.
+    const without_memory = list_component[0..350] ++
+        "\x08\x08\x01\x00\x00\x01\x01\x04\x00\x01" ++
+        list_component[362..];
+    try std.testing.expectError(error.MissingCanonicalMemory, resolve(std.testing.allocator, without_memory, "checksum"));
 }
